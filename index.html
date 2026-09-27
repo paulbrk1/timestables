@@ -385,6 +385,7 @@
       <div class="game-picks">
         <!-- One button per game in GAMES. The grid fills back out on its own as more are added. -->
         <button class="game-pick" data-game="munchy"><canvas></canvas>Munchy Maze</button>
+        <button class="game-pick" data-game="lilyhop"><canvas></canvas>Lily Hop</button>
       </div>
     </div>
     <div id="gameView" hidden>
@@ -1596,8 +1597,315 @@ const Munchy = {
   press(action) { if (DIRS[action]) steer(DIRS[action]); }
 };
 
+/* ================= LILY HOP ================= */
+const FT = 40;
+// Board rows: 0 lily pads, 1-4 water, 5 bank, 6-9 road, 10 kerb, 11 timer strip
+const WATER_TOP = 1, BANK_ROW = 5, ROAD_TOP = 6, START_ROW = 10, STRIP_ROW = 11;
+const LILY_PADS = [1, 4, 8, 11];
+// loop = lane length in tiles before objects wrap round; must be at least 13 + len
+const HOP_LANES = [
+  { row: 1, kind: 'log', dir: 1, speed: 45, len: 4, offsets: [0, 7, 13], loop: 20 },
+  { row: 2, kind: 'pad', dir: -1, speed: 55, len: 2, offsets: [0, 5, 10, 15], loop: 20, sinkGroup: 1 },
+  { row: 3, kind: 'log', dir: 1, speed: 85, len: 6, offsets: [0, 10], loop: 20 },
+  { row: 4, kind: 'pad', dir: -1, speed: 42, len: 3, offsets: [0, 6, 12], loop: 18, sinkGroup: 2 },
+  { row: 6, kind: 'truck', dir: -1, speed: 45, len: 2, offsets: [0, 7, 13], loop: 18, colour: '#ff9f1c' },
+  { row: 7, kind: 'racer', dir: 1, speed: 120, len: 1, offsets: [0, 9], loop: 18, colour: '#ffffff' },
+  { row: 8, kind: 'car', dir: -1, speed: 65, len: 1, offsets: [1, 7, 13], loop: 18, colour: '#ff5ce1' },
+  { row: 9, kind: 'dozer', dir: 1, speed: 50, len: 1, offsets: [0, 6, 12], loop: 18, colour: '#3de3ff' }
+];
+const hopSfx = {
+  hop()   { tone(620, 0.05, 'square', 0.07); tone(820, 0.05, 'square', 0.07, 0.05); },
+  splat() { sweep(500, 60, 0.6, 'sawtooth', 0.12); },
+  home()  { [659, 784, 988, 1319].forEach((f, i) => tone(f, 0.12, 'triangle', 0.18, i * 0.09)); }
+};
+
+function drawHopper(cx, cy, face, hopping) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(Math.atan2(face.y, face.x) + Math.PI / 2);
+  if (hopping) ctx.scale(1.15, 1.15);
+  ctx.fillStyle = '#3ddc4a';
+  for (const sx of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(sx * 11, -8, 4, 7, sx * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(sx * 12, 9, 5, 8, -sx * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#2fb83b';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 10, 13, 0, 0, Math.PI * 2);
+  ctx.fill();
+  for (const sx of [-1, 1]) {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(sx * 5, -10, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(sx * 5, -11, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+// A lily pad: a notched disc with radiating veins. Waterlogged ones ride low and dark.
+function drawPad(cx, cy, dir, sinking) {
+  const r = sinking ? 11 : 16;
+  const notch = dir > 0 ? 0 : Math.PI;
+  ctx.fillStyle = sinking ? '#1f6b32' : '#2fb84a';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, r, notch + 0.45, notch - 0.45 + Math.PI * 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = sinking ? '#145124' : '#26933b';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let k = 0; k <= 4; k++) {
+    const a = notch + 0.7 + k * (Math.PI * 2 - 1.4) / 4;
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * r * 0.82, cy + Math.sin(a) * r * 0.82);
+  }
+  ctx.stroke();
+  if (!sinking) {
+    ctx.fillStyle = '#ffd6ef';
+    ctx.beginPath();
+    ctx.arc(cx - Math.cos(notch) * r * 0.35, cy - r * 0.3, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+function drawLog(x, y, w) {
+  ctx.fillStyle = '#8b5a2b';
+  roundRect(x + 2, y + 7, w - 4, FT - 14, 12);
+  ctx.fill();
+  ctx.fillStyle = '#6b4220';
+  for (let gx = x + 18; gx < x + w - 24; gx += 26) {
+    ctx.fillRect(gx, y + 15, 14, 3);
+    ctx.fillRect(gx + 8, y + 23, 12, 3);
+  }
+  ctx.fillStyle = '#c68a4e';
+  ctx.beginPath();
+  ctx.ellipse(x + w - 9, y + FT / 2, 6, FT / 2 - 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+function drawVehicle(kind, x, y, w, dir, colour) {
+  ctx.fillStyle = '#777';
+  for (const wx of [x + 8, x + w - 18]) {
+    ctx.fillRect(wx, y + 5, 10, 5);
+    ctx.fillRect(wx, y + FT - 10, 10, 5);
+  }
+  if (kind === 'truck') {
+    ctx.fillStyle = '#f2f2f2';
+    roundRect(dir > 0 ? x + 2 : x + 22, y + 8, w - 24, FT - 16, 4);
+    ctx.fill();
+    ctx.fillStyle = colour;
+    roundRect(dir > 0 ? x + w - 20 : x + 2, y + 9, 18, FT - 18, 4);
+    ctx.fill();
+    return;
+  }
+  ctx.fillStyle = colour;
+  roundRect(x + 4, y + 9, w - 8, FT - 18, 7);
+  ctx.fill();
+  ctx.fillStyle = '#1d2433';
+  ctx.fillRect(dir > 0 ? x + w - 16 : x + 10, y + 13, 6, FT - 26);
+  if (kind === 'dozer') {
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(dir > 0 ? x + w - 5 : x + 1, y + 6, 4, FT - 12);
+  }
+  if (kind === 'racer') {
+    ctx.fillStyle = '#ff3b3b';
+    ctx.fillRect(x + 8, y + FT / 2 - 2, w - 16, 4);
+  }
+}
+
+const LilyHop = {
+  width: 13 * FT,
+  height: 12 * FT,
+  readyAt: { x: 6.5 * FT, y: 5.5 * FT },
+  verb: 'Hop',
+  help: 'Dodge the traffic, ride the river, and fill all 4 lily pads!',
+  tapAction: 'up', // on touch, a plain tap hops forward
+  newGame() { this.startLevel(); },
+  startLevel() {
+    const faster = 1 + 0.2 * (G.level - 1);
+    this.lanes = HOP_LANES.map(lane => ({
+      ...lane,
+      speed: lane.speed * faster,
+      objs: lane.offsets.map((o, i) => ({ pos: o * FT, x: 0, i }))
+    }));
+    this.filled = LILY_PADS.map(() => false);
+    this.clock = 0;
+    this.moveObjects(0);
+    this.resetRound();
+  },
+  resetRound() {
+    this.frog = { x: 6.5 * FT, row: START_ROW, face: DIRS.up, hop: 0 };
+    this.bestRow = START_ROW;
+    this.timeLeft = 30;
+    this.death = null;
+  },
+  press(action) {
+    const d = DIRS[action];
+    if (!d || G.state !== 'play') return;
+    const f = this.frog;
+    const nx = f.x + d.x * FT, nr = f.row + d.y;
+    f.face = d;
+    if (nr > START_ROW || nx < FT * 0.4 || nx > this.width - FT * 0.4) return;
+    f.x = nx;
+    f.row = nr;
+    f.hop = 0.12;
+    hopSfx.hop();
+    if (nr < this.bestRow) { this.bestRow = nr; addScore(10); }
+    if (nr === 0) this.reachHome();
+  },
+  reachHome() {
+    const f = this.frog;
+    const i = LILY_PADS.findIndex(c => Math.abs(f.x - (c + 0.5) * FT) < FT * 0.45);
+    if (i < 0 || this.filled[i]) { this.die('splat'); return; }
+    this.filled[i] = true;
+    const bonus = 50 + Math.ceil(this.timeLeft) * 10;
+    addScore(bonus);
+    popup((LILY_PADS[i] + 0.5) * FT, 1.4 * FT, bonus, '#ffd23f');
+    hopSfx.home();
+    if (this.filled.every(Boolean)) {
+      addScore(1000);
+      levelCleared();
+    } else {
+      this.resetRound();
+    }
+  },
+  die(kind) {
+    this.death = kind;
+    hopSfx.splat();
+    loseLife(1.5);
+  },
+  moveObjects(dt) {
+    for (const lane of this.lanes) {
+      const loop = lane.loop * FT;
+      for (const o of lane.objs) {
+        o.pos += lane.dir * lane.speed * dt;
+        o.x = ((o.pos % loop) + loop) % loop - lane.len * FT;
+      }
+    }
+  },
+  // One group per lane slowly waterlogs and slips under, then bobs back up
+  padPhase(lane, o) {
+    if (lane.kind !== 'pad' || o.i !== lane.sinkGroup) return 'up';
+    const t = (this.clock + lane.row) % 6;
+    return t < 3.6 ? 'up' : t < 4.3 ? 'half' : t < 5.3 ? 'under' : 'half';
+  },
+  update(dt) {
+    this.clock += dt;
+    this.moveObjects(dt);
+    const f = this.frog;
+    f.hop = Math.max(0, f.hop - dt);
+    if ((this.timeLeft -= dt) <= 0) { this.die('splat'); return; }
+
+    const lane = this.lanes.find(l => l.row === f.row);
+    if (!lane) return; // safe pavement
+    if (lane.row >= ROAD_TOP) {
+      for (const o of lane.objs) {
+        if (f.x + FT * 0.3 > o.x + 4 && f.x - FT * 0.3 < o.x + lane.len * FT - 4) { this.die('splat'); return; }
+      }
+    } else {
+      const ride = lane.objs.find(o => f.x > o.x + 4 && f.x < o.x + lane.len * FT - 4 && this.padPhase(lane, o) !== 'under');
+      if (!ride) { this.die('water'); return; }
+      f.x += lane.dir * lane.speed * dt;
+      if (f.x < FT * 0.1 || f.x > this.width - FT * 0.1) this.die('water');
+    }
+  },
+  draw() {
+    const W = this.width;
+    ctx.fillStyle = '#1f8f3a';
+    ctx.fillRect(0, 0, W, FT);
+    ctx.fillStyle = '#0b3a9e';
+    ctx.fillRect(0, WATER_TOP * FT, W, (BANK_ROW - WATER_TOP) * FT);
+    for (const c of LILY_PADS) ctx.fillRect(c * FT - 4, 8, FT + 8, FT - 8);
+    for (const r of [BANK_ROW, START_ROW]) {
+      ctx.fillStyle = '#6b44b8';
+      ctx.fillRect(0, r * FT, W, FT);
+      ctx.fillStyle = '#8a63d2';
+      for (let x = 0; x < W; x += 20) ctx.fillRect(x + 2, r * FT + 4, 16, FT - 8);
+    }
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, ROAD_TOP * FT, W, (START_ROW - ROAD_TOP) * FT);
+    ctx.fillStyle = '#666';
+    for (let r = ROAD_TOP + 1; r < START_ROW; r++) {
+      for (let x = 6; x < W; x += 40) ctx.fillRect(x, r * FT - 1, 22, 2);
+    }
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, STRIP_ROW * FT, W, FT);
+
+    for (const lane of this.lanes) {
+      for (const o of lane.objs) {
+        const y = lane.row * FT, w = lane.len * FT;
+        if (o.x > W || o.x + w < 0) continue;
+        if (lane.kind === 'log') {
+          drawLog(o.x, y, w);
+        } else if (lane.kind === 'pad') {
+          const phase = this.padPhase(lane, o);
+          for (let k = 0; k < lane.len; k++) {
+            const cx = o.x + (k + 0.5) * FT, cy = y + FT / 2;
+            if (phase === 'under') {
+              // fully waterlogged — only the ripple where it went down
+              ctx.strokeStyle = '#5f8fff';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+              ctx.stroke();
+            } else {
+              drawPad(cx, cy, lane.dir, phase === 'half');
+            }
+          }
+        } else {
+          drawVehicle(lane.kind, o.x, y, w, lane.dir, lane.colour);
+        }
+      }
+    }
+
+    this.filled.forEach((done, i) => { if (done) drawHopper((LILY_PADS[i] + 0.5) * FT, 0.6 * FT, DIRS.down, false); });
+
+    const f = this.frog, fy = (f.row + 0.5) * FT;
+    if (G.state === 'dying') this.drawDeath(f.x, fy);
+    else drawHopper(f.x, fy, f.face, f.hop > 0);
+
+    const frac = clamp(this.timeLeft / 30, 0, 1);
+    ctx.fillStyle = frac < 0.3 ? '#ff3b3b' : '#7dff6a';
+    ctx.fillRect(W - 12 - (W - 90) * frac, STRIP_ROW * FT + 14, (W - 90) * frac, 12);
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = `900 16px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('TIME', 12, STRIP_ROW * FT + 21);
+  },
+  drawDeath(x, y) {
+    const age = clamp((G.dyingTime - G.timer) / G.dyingTime, 0, 1);
+    if (this.death === 'water') {
+      ctx.strokeStyle = '#bfe3ff';
+      ctx.lineWidth = 3;
+      for (let k = 0; k < 3; k++) {
+        ctx.beginPath();
+        ctx.arc(x, y, 4 + (age * 18 + k * 6) % 20, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else {
+      ctx.fillStyle = '#ff3b3b';
+      for (let k = 0; k < 8; k++) {
+        const angle = k / 8 * Math.PI * 2, r = 6 + age * 12;
+        ctx.beginPath();
+        ctx.arc(x + Math.cos(angle) * r, y + Math.sin(angle) * r, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(x, y, 8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+};
+
 // Add a game here and give it a matching PREVIEWS entry and a .game-pick button.
-const GAMES = { munchy: Munchy };
+const GAMES = { munchy: Munchy, lilyhop: LilyHop };
 
 /* ----- game picker previews ----- */
 const PREVIEWS = {
@@ -1606,6 +1914,16 @@ const PREVIEWS = {
     for (const x of [80, 100, 120]) ctx.fillRect(x - 2, 48, 4, 4);
     drawHero(1.5, 2, DIRS.right, 0.8);
     drawGhost({ x: 7.2, y: 2, color: '#ff5ca8', state: 'active', dir: DIRS.left, frightened: false });
+  },
+  lilyhop() {
+    ctx.fillStyle = '#0b3a9e';
+    ctx.fillRect(0, 0, 200, 50);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 50, 200, 50);
+    drawLog(10, 5, 130);
+    drawPad(172, 25, -1, false);
+    drawVehicle('car', 120, 55, 40, -1, '#ffd23f');
+    drawHopper(70, 25, DIRS.up, false);
   }
 };
 function drawPreviews() {
