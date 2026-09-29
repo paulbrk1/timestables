@@ -385,6 +385,7 @@
       <div class="game-picks">
         <!-- One button per game in GAMES. The grid fills back out on its own as more are added. -->
         <button class="game-pick" data-game="munchy"><canvas></canvas>Munchy Maze</button>
+        <button class="game-pick" data-game="starswarm"><canvas></canvas>Star Swarm</button>
         <button class="game-pick" data-game="lilyhop"><canvas></canvas>Lily Hop</button>
       </div>
     </div>
@@ -949,6 +950,7 @@ let ctx = gameCtx; // swapped briefly when drawing the game-picker previews
 const G = { token: 0, state: 'off', scale: 1, game: null, held: {}, touchX: null, popups: [], time: 0 };
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const rand = (lo, hi) => lo + Math.random() * (hi - lo);
 
 function sweep(from, to, dur, type = 'square', vol = 0.12, delay = 0) {
   const a = audio();
@@ -970,6 +972,21 @@ const gameSfx = {
   level()  { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.2, 'triangle', 0.2, i * 0.13)); }
 };
 
+// Pixel-art sprites: rows of characters, '.' is transparent, other characters look up a colour.
+function makeSprite(rows, palette) {
+  const pixels = [];
+  rows.forEach((row, y) => [...row].forEach((ch, x) => {
+    if (ch !== '.') pixels.push([x, y, palette[ch] || palette['#']]);
+  }));
+  return { w: rows[0].length, h: rows.length, pixels };
+}
+function drawSprite(sprite, cx, cy, p, colour) {
+  const ox = cx - sprite.w * p / 2, oy = cy - sprite.h * p / 2;
+  for (const [x, y, c] of sprite.pixels) {
+    ctx.fillStyle = colour || c;
+    ctx.fillRect(ox + x * p, oy + y * p, p + 0.1, p + 0.1);
+  }
+}
 function roundRect(x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -1170,6 +1187,14 @@ function drawGame() {
     ctx.fillText(pop.text, pop.x, pop.y);
   }
 }
+
+// Shared ship controls for the shooters
+function moveShip(p, speed, dt, minX, maxX) {
+  if (G.touchX !== null) p.x += clamp(G.touchX - p.x, -speed * dt, speed * dt);
+  else p.x += ((G.held.right ? 1 : 0) - (G.held.left ? 1 : 0)) * speed * dt;
+  p.x = clamp(p.x, minX, maxX);
+}
+const wantsFire = () => G.held.fire || G.touchX !== null;
 
 /* ================= MUNCHY MAZE ================= */
 // Mirror-symmetric original layout. Every dot is reachable from the hero's start
@@ -1597,6 +1622,247 @@ const Munchy = {
   press(action) { if (DIRS[action]) steer(DIRS[action]); }
 };
 
+/* ================= STAR SWARM ================= */
+const SWARM_P = 2.5;
+// A hex-crystal core with side fins that fold in and out, and two thruster sparks.
+const MOTE = [
+  ['...ccccc...', '..ccccccc..', '.ffcccccff.', 'ffbcc.ccbff', '.ffcccccff.', '...ccccc...', '....c.c....', '...t...t...'],
+  ['...ccccc...', '..ccccccc..', 'fffcccccfff', 'ff.cc.cc.ff', '.f.ccccc.f.', '...ccccc...', '...c...c...', '..t.....t..']
+];
+// The warden: a glowing core held inside a spinning halo ring.
+const WARDEN = [
+  ['...hhhhh...', '..h.....h..', '.h..ccc..h.', 'h..ccccc..h', 'h..ccccc..h', '.h..ccc..h.', '..h.....h..', '...h...h...'],
+  ['...h.h.h...', '..hh...hh..', '.h..ccc..h.', 'hh.ccccc.hh', 'hh.ccccc.hh', '.h..ccc..h.', '..hh...hh..', '...h...h...']
+];
+const SWARM_SPRITES = {
+  mote:    MOTE.map(rows => makeSprite(rows, { c: '#3fa0ff', f: '#1d5fb8', b: '#cfe8ff', t: '#7dff6a' })),
+  seeker:  MOTE.map(rows => makeSprite(rows, { c: '#7dff6a', f: '#2f9e45', b: '#eaffe4', t: '#ffd23f' })),
+  stinger: MOTE.map(rows => makeSprite(rows, { c: '#ff5ce1', f: '#a5248c', b: '#ffe4f8', t: '#ffd23f' })),
+  warden:  WARDEN.map(rows => makeSprite(rows, { h: '#ffd23f', c: '#ff3b3b' })),
+  // Twin-hulled interceptor: needle nose, outrigger pods, a violet engine band.
+  player: makeSprite(['.....#.....', '....#b#....', '....#b#....', '.#..#b#..#.', '.#.#####.#.', '##ccccccc##', '##.#####.##', '#...#.#...#', '....r.r....'],
+    { '#': '#cfe8ff', b: '#3de3ff', c: '#7c5cff', r: '#ffd23f' })
+};
+// A diamond swarm with a hollow chevron under the wardens — widest in the middle, not the base.
+const SWARM_LAYOUT = [
+  ['warden', [4, 5]],
+  ['stinger', [2, 3, 6, 7]],
+  ['stinger', [1, 2, 3, 4, 5, 6, 7, 8]],
+  ['seeker', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
+  ['mote', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]],
+  ['mote', [2, 3, 4, 5, 6, 7]]
+];
+// [in formation, diving] — a diver is always worth exactly triple
+const SWARM_POINTS = { mote: [25, 75], seeker: [45, 135], stinger: [70, 210], warden: [150, 450] };
+const STAR_COLOURS = ['#ffffff', '#ffd23f', '#3de3ff', '#ff5ce1', '#7dff6a'];
+const swarmSfx = {
+  shoot() { tone(1320, 0.06, 'square', 0.07); tone(1980, 0.05, 'square', 0.05, 0.03); },
+  hit()   { sweep(260, 1100, 0.18, 'triangle', 0.09); },
+  dive()  { [880, 660, 440].forEach((f, i) => tone(f, 0.1, 'sine', 0.06, i * 0.06)); },
+  death() { sweep(120, 900, 0.9, 'square', 0.1); }
+};
+
+const StarSwarm = {
+  width: 480,
+  height: 600,
+  usesFire: true,
+  readyAt: { x: 240, y: 380 },
+  help: 'Shoot the swarm — divers are worth triple!',
+  newGame() {
+    this.stars = Array.from({ length: 70 }, (_, i) => ({
+      x: Math.random() * 480, y: Math.random() * 600, speed: rand(15, 60), colour: STAR_COLOURS[i % 5], blink: Math.random() * 10
+    }));
+    this.startLevel();
+  },
+  startLevel() {
+    this.aliens = [];
+    SWARM_LAYOUT.forEach(([type, cols], r) => cols.forEach(c => {
+      this.aliens.push({ type, r, c, alive: true, state: 'formation', x: 0, y: 0, vx: 0, vy: 0, t: 0 });
+    }));
+    this.sway = 0;
+    this.resetRound();
+  },
+  resetRound() {
+    this.player = { x: 240, y: 560 };
+    this.shot = null;
+    this.bombs = [];
+    this.booms = [];
+    this.diveTimer = 3;
+    for (const a of this.aliens) { a.state = 'formation'; this.toSlot(a); }
+  },
+  // each row lags the one above, so the swarm ripples instead of sliding as one block
+  slotX(a) { return 240 + (a.c - 4.5) * 40 + Math.sin(this.sway * 0.8 - a.r * 0.45) * 25; },
+  slotY(a) { return 70 + a.r * 30; },
+  toSlot(a) { a.x = this.slotX(a); a.y = this.slotY(a); a.vx = 0; a.vy = 0; },
+  update(dt) {
+    this.sway += dt;
+    const p = this.player;
+    moveShip(p, 240, dt, 20, 460);
+    if (wantsFire() && !this.shot) {
+      this.shot = { x: p.x, y: p.y - 16 };
+      swarmSfx.shoot();
+    }
+    if (this.shot && (this.shot.y -= 620 * dt) < -10) this.shot = null;
+
+    const alive = this.aliens.filter(a => a.alive);
+    this.launchDives(dt, alive);
+    for (const a of alive) {
+      if (a.state === 'formation') this.toSlot(a);
+      else if (a.state === 'diving') this.updateDiver(a, dt);
+      else this.updateReturning(a, dt);
+    }
+
+    this.booms = this.booms.filter(b => G.time - b.born < b.dur);
+    for (const b of this.bombs) b.y += 280 * dt;
+    this.bombs = this.bombs.filter(b => b.y < 620);
+
+    if (this.shot) this.shotHits(alive);
+    if (!this.aliens.some(a => a.alive)) { levelCleared(); return; }
+
+    for (const b of this.bombs) {
+      if (Math.abs(b.x - p.x) < 12 && Math.abs(b.y - p.y) < 14) { this.playerHit(); return; }
+    }
+    for (const a of alive) {
+      if (a.alive && a.state !== 'formation' && Math.hypot(a.x - p.x, a.y - p.y) < 24) {
+        a.alive = false;
+        this.booms.push({ x: a.x, y: a.y, born: G.time, dur: 0.5 });
+        this.playerHit();
+        return;
+      }
+    }
+  },
+  shotHits(alive) {
+    const s = this.shot;
+    for (const a of alive) {
+      if (!a.alive || Math.abs(a.x - s.x) > 14 || Math.abs(a.y - s.y) > 14) continue;
+      const diving = a.state !== 'formation';
+      const points = SWARM_POINTS[a.type][diving ? 1 : 0];
+      a.alive = false;
+      this.shot = null;
+      addScore(points);
+      if (diving) popup(a.x, a.y, points, '#ffd23f');
+      this.booms.push({ x: a.x, y: a.y, born: G.time, dur: 0.5 });
+      swarmSfx.hit();
+      return;
+    }
+  },
+  launchDives(dt, alive) {
+    if ((this.diveTimer -= dt) > 0) return;
+    const home = alive.filter(a => a.state === 'formation');
+    const diving = alive.length - home.length;
+    this.diveTimer = Math.max(0.5, 2.4 - 0.2 * (G.level - 1)) * rand(0.6, 1.3) * (alive.length <= 6 ? 0.5 : 1);
+    if (!home.length || diving >= Math.min(2 + G.level, 7)) return;
+
+    // the swarm sheds its outermost members first — the diamond erodes from its points inwards
+    const reach = a => Math.hypot(a.c - 4.5, a.r - 2.5);
+    const furthest = Math.max(...home.map(reach));
+    const choices = home.filter(a => reach(a) >= furthest - 0.8);
+    const leader = choices[Math.floor(Math.random() * choices.length)];
+    const group = [leader];
+    if (leader.type === 'warden') {
+      // a warden drags its three closest stingers down with it, wherever they sit
+      group.push(...home.filter(a => a.type === 'stinger')
+        .sort((p, q) => Math.hypot(p.c - leader.c, p.r - leader.r) - Math.hypot(q.c - leader.c, q.r - leader.r))
+        .slice(0, 3));
+    }
+    group.forEach((a, i) => this.startDive(a, i));
+    swarmSfx.dive();
+  },
+  startDive(a, i) {
+    a.state = 'diving';
+    a.t = -i * 0.15; // escorts follow just behind their warden
+    a.side = a.x < 240 ? -1 : 1;
+    a.aim = rand(-50, 50);
+    a.shots = 1 + Math.floor(Math.random() * Math.min(3, G.level + 1));
+    a.nextShot = rand(160, 260);
+  },
+  updateDiver(a, dt) {
+    a.t += dt;
+    if (a.t < 0) { this.toSlot(a); return; }
+    const LOOP = 0.8;
+    if (a.t < LOOP) {
+      // half loop: up, out to the side, then down
+      const heading = -Math.PI / 2 + a.side * Math.PI * (a.t / LOOP);
+      a.vx = Math.cos(heading) * 130;
+      a.vy = Math.sin(heading) * 130;
+    } else {
+      const speed = Math.min(170 + 20 * (G.level - 1), 280);
+      a.vy = Math.min(a.vy + 300 * dt, speed);
+      a.vx = clamp(a.vx + clamp((this.player.x + a.aim - a.x) * 3, -260, 260) * dt, -140, 140);
+      if (a.shots > 0 && a.y > a.nextShot && a.y < 450) {
+        this.bombs.push({ x: a.x, y: a.y + 12 });
+        a.shots--;
+        a.nextShot = a.y + rand(40, 90);
+      }
+    }
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    if (a.y > 630) { // off the bottom: come back in from the top
+      a.state = 'returning';
+      a.y = -20;
+      a.x = this.slotX(a);
+    }
+  },
+  updateReturning(a, dt) {
+    const dx = this.slotX(a) - a.x, dy = this.slotY(a) - a.y;
+    const dist = Math.hypot(dx, dy), speed = 150;
+    if (dist <= speed * dt) { a.state = 'formation'; this.toSlot(a); return; }
+    a.vx = dx / dist * speed;
+    a.vy = dy / dist * speed;
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+  },
+  playerHit() {
+    this.booms.push({ x: this.player.x, y: this.player.y, born: G.time, dur: 1.2, big: true });
+    swarmSfx.death();
+    loseLife(1.5);
+  },
+  draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, this.width, this.height);
+    for (const s of this.stars) {
+      if (Math.floor(G.time * 2 + s.blink) % 4 === 0) continue;
+      ctx.fillStyle = s.colour;
+      ctx.fillRect(s.x, (s.y + G.time * s.speed) % 600, 2, 2);
+    }
+
+    const flap = Math.floor(G.time * 3) % 2;
+    for (const a of this.aliens) {
+      if (!a.alive) continue;
+      const frames = SWARM_SPRITES[a.type];
+      if (a.state === 'formation' || (!a.vx && !a.vy)) {
+        drawSprite(frames[(flap + a.c) % 2], a.x, a.y, SWARM_P);
+      } else {
+        ctx.save();
+        ctx.translate(a.x, a.y);
+        ctx.rotate(Math.atan2(a.vy, a.vx) - Math.PI / 2);
+        drawSprite(frames[0], 0, 0, SWARM_P);
+        ctx.restore();
+      }
+    }
+
+    if (this.shot) {
+      ctx.fillStyle = '#ffd23f';
+      ctx.fillRect(this.shot.x - 1, this.shot.y - 6, 2, 12);
+    }
+    ctx.fillStyle = '#ffffff';
+    for (const b of this.bombs) ctx.fillRect(b.x - 1.5, b.y - 5, 3, 10);
+
+    for (const b of this.booms) {
+      const age = (G.time - b.born) / b.dur;
+      if (age > 1) continue;
+      const radius = (b.big ? 30 : 16) * age + 3;
+      for (let i = 0; i < 10; i++) {
+        const angle = i / 10 * Math.PI * 2;
+        ctx.fillStyle = ['#ffd23f', '#ff3b3b', '#ffffff'][i % 3];
+        ctx.fillRect(b.x + Math.cos(angle) * radius - 2, b.y + Math.sin(angle) * radius - 2, 4, 4);
+      }
+    }
+
+    if (G.state !== 'dying') drawSprite(SWARM_SPRITES.player, this.player.x, this.player.y, 3);
+  }
+};
+
 /* ================= LILY HOP ================= */
 const FT = 40;
 // Board rows: 0 lily pads, 1-4 water, 5 bank, 6-9 road, 10 kerb, 11 timer strip
@@ -1905,7 +2171,7 @@ const LilyHop = {
 };
 
 // Add a game here and give it a matching PREVIEWS entry and a .game-pick button.
-const GAMES = { munchy: Munchy, lilyhop: LilyHop };
+const GAMES = { munchy: Munchy, starswarm: StarSwarm, lilyhop: LilyHop };
 
 /* ----- game picker previews ----- */
 const PREVIEWS = {
@@ -1914,6 +2180,16 @@ const PREVIEWS = {
     for (const x of [80, 100, 120]) ctx.fillRect(x - 2, 48, 4, 4);
     drawHero(1.5, 2, DIRS.right, 0.8);
     drawGhost({ x: 7.2, y: 2, color: '#ff5ca8', state: 'active', dir: DIRS.left, frightened: false });
+  },
+  starswarm() {
+    ctx.fillStyle = '#fff';
+    for (const [x, y] of [[20, 15], [180, 25], [35, 70], [165, 80], [120, 10]]) ctx.fillRect(x, y, 2, 2);
+    drawSprite(SWARM_SPRITES.stinger[0], 60, 36, 3);
+    drawSprite(SWARM_SPRITES.warden[0], 100, 30, 3);
+    drawSprite(SWARM_SPRITES.stinger[1], 140, 36, 3);
+    drawSprite(SWARM_SPRITES.player, 100, 82, 2.4);
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(99, 52, 2, 10);
   },
   lilyhop() {
     ctx.fillStyle = '#0b3a9e';
