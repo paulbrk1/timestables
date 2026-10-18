@@ -259,6 +259,25 @@
   .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
   .chip { background: #fff4e0; color: #b86b00; border-radius: 999px; padding: 4px 14px; font-weight: 900; }
 
+  /* ---------- Trace the number ---------- */
+  .trace-hint { color: var(--muted); font-size: 1.1rem; font-weight: 800; margin: .2em 0 0; }
+  .trace-box {
+    position: relative; margin: 16px auto 0;
+    width: min(100%, 320px); aspect-ratio: 3 / 4;
+    background: #f7f9fc; border: 3px dashed var(--line); border-radius: 24px;
+  }
+  .trace-box canvas {
+    display: block; width: 100%; height: 100%;
+    border-radius: 24px;
+    touch-action: none; cursor: crosshair; -webkit-tap-highlight-color: transparent;
+  }
+  .trace-score { min-height: 2.6em; margin: 14px 0 0; font-weight: 900; font-size: 1.3rem; color: var(--blue); }
+  .trace-score .stars { display: block; font-size: 2rem; line-height: 1.2; }
+  .trace-score.good { color: var(--green); }
+  .trace-score.soft { color: var(--orange); }
+  .trace-btns { display: flex; flex-wrap: wrap; justify-content: center; }
+  .trace-btns .big { margin-top: 8px; padding: 12px 28px; font-size: 1.2rem; }
+
   /* ---------- Munchy Maze ---------- */
   .hud { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-weight: 900; font-size: 1.15rem; margin-bottom: 10px; }
   .hud b { color: var(--blue); }
@@ -421,7 +440,19 @@
 
   <!-- ================= DONE ================= -->
   <section id="done" hidden>
-    <div id="askView">
+    <!-- End-of-round handwriting challenge: trace the grey digit, get a score out of 100 -->
+    <div id="traceView" hidden>
+      <h1>Trace the number!</h1>
+      <p class="trace-hint">Draw along the grey <b id="traceDigit">0</b> with your finger or pen.</p>
+      <div class="trace-box"><canvas id="traceCanvas" aria-label="Tracing area"></canvas></div>
+      <p class="trace-score" id="traceScore"></p>
+      <div class="trace-btns">
+        <button class="big grey" id="traceClear">Clear</button>
+        <button class="big" id="traceCheck">Check my tracing ✓</button>
+        <button class="big" id="traceNext" hidden>Carry on →</button>
+      </div>
+    </div>
+    <div id="askView" hidden>
       <div class="trophy">🏆</div>
       <h1>Congratulations,</h1>
       <p class="ask">would you like to play a game?</p>
@@ -1087,13 +1118,22 @@ function startWait() {
 }
 
 /* ---------------- Finished ---------------- */
+// A finished round ends with the tracing challenge; the trophy and the game
+// offer come after it, once the child taps "Carry on".
 function finish() {
   S.phase = 'done';
   recordRun(); // only a completed run is logged — stopping early records nothing
   show('done');
-  $('askView').hidden = false;
+  $('traceView').hidden = false;
+  $('askView').hidden = true;
   $('pickView').hidden = true;
   $('gameView').hidden = true;
+  startTrace();
+}
+
+function celebrate() {
+  $('traceView').hidden = true;
+  $('askView').hidden = false;
 
   const summary = $('summary');
   if (S.practised.length) {
@@ -1124,6 +1164,269 @@ function confetti() {
 }
 $('yesBtn').addEventListener('click', openGamePicker);
 $('noBtn').addEventListener('click', stop);
+
+/* ---------------- Trace the number ---------------- */
+// Each digit is a hand-written stroke path drawn as a chunky grey "road" in a
+// 100x140 box. The child draws along it, and the score compares the two paths as
+// points: how much of the road was driven along (coverage) and how much of the
+// child's line stayed on the road (neatness). Both matter, so a line that skips
+// half the digit and a scribble over the whole box both score badly.
+const TRACE_BOX = { w: 100, h: 140 };
+const TRACE_ROAD = 16;   // width of the grey road, in box units
+const TRACE_SLACK = 4;   // how far outside the road still counts as on it
+const TRACE_STEP = 1.5;  // spacing of the points the two paths are compared as
+// Written the way a child is taught to form them: each entry is one or more
+// strokes, in writing order, starting where the pencil should start.
+const DIGIT_STROKES = {
+  0: ['M50 8 C28 8 14 36 14 70 C14 104 28 132 50 132 C72 132 86 104 86 70 C86 36 72 8 50 8'],
+  1: ['M26 34 L52 12 L52 132'],
+  2: ['M16 36 C18 16 40 6 60 12 C80 18 88 40 72 58 C56 76 32 100 16 132 L86 132'],
+  3: ['M18 28 C28 10 58 4 72 18 C84 30 78 52 54 60 C80 60 92 78 86 100 C80 124 42 138 16 118'],
+  4: ['M66 10 L14 92 L88 92', 'M66 10 L66 132'],
+  5: ['M80 12 L34 12 L28 58 C56 44 88 60 86 92 C84 122 48 138 18 120'],
+  6: ['M74 12 C44 26 18 58 18 92 C18 118 36 132 52 132 C72 132 84 116 82 98 C80 78 58 66 42 74 C30 80 22 88 18 98'],
+  7: ['M16 14 L84 14 L44 132'],
+  8: ['M50 66 C26 58 20 38 30 24 C40 8 64 10 72 26 C80 42 72 58 50 66 C24 76 16 100 28 116 C40 132 66 130 74 114 C82 98 74 76 50 66'],
+  9: ['M80 46 C78 24 56 12 38 20 C20 28 14 50 26 64 C38 78 62 80 76 68 C82 62 80 52 80 46 L80 92 C80 118 66 132 44 134']
+};
+const TRACE = {
+  digit: 0, guide: null,
+  strokes: [], drawing: null,          // the child's line, in box units
+  scored: false, score: 0,
+  w: 0, h: 0, dpr: 1,
+  scale: 1, ox: 0, oy: 0               // how the box is fitted onto the canvas
+};
+const traceCanvas = $('traceCanvas');
+const traceCtx = traceCanvas.getContext('2d');
+
+/* ----- the guide path ----- */
+// Sampled through an off-screen SVG path, which knows how to walk its own curves.
+let traceSvg;
+function samplePath(d) {
+  if (!traceSvg) {
+    traceSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    traceSvg.setAttribute('aria-hidden', 'true');
+    traceSvg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
+    document.body.appendChild(traceSvg);
+  }
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', d);
+  traceSvg.appendChild(path);
+  const length = path.getTotalLength();
+  const points = [];
+  for (let at = 0; at < length; at += TRACE_STEP) {
+    const p = path.getPointAtLength(at);
+    points.push([p.x, p.y]);
+  }
+  const end = path.getPointAtLength(length);
+  points.push([end.x, end.y]);
+  path.remove();
+  return { points, length };
+}
+const guideCache = {};
+function guideFor(digit) {
+  if (!guideCache[digit]) {
+    const strokes = DIGIT_STROKES[digit].map(d => Object.assign(samplePath(d), { shape: new Path2D(d) }));
+    guideCache[digit] = {
+      strokes,
+      points: strokes.flatMap(s => s.points),
+      length: strokes.reduce((sum, s) => sum + s.length, 0)
+    };
+  }
+  return guideCache[digit];
+}
+
+/* ----- the round ----- */
+function startTrace() {
+  TRACE.digit = Math.floor(Math.random() * 10);
+  TRACE.guide = guideFor(TRACE.digit);
+  resetTrace();
+  $('traceDigit').textContent = TRACE.digit;
+  sfx.chime();
+  later(() => say(`Great work! Now trace the number ${TRACE.digit}.`), 500);
+}
+function resetTrace() {
+  TRACE.strokes = [];
+  TRACE.drawing = null;
+  TRACE.scored = false;
+  TRACE.score = 0;
+  $('traceScore').textContent = '';
+  $('traceScore').className = 'trace-score';
+  $('traceCheck').hidden = false;
+  $('traceNext').hidden = true;
+  sizeTrace();
+}
+
+function sizeTrace() {
+  const rect = traceCanvas.getBoundingClientRect();
+  TRACE.w = Math.max(Math.round(rect.width), 120);
+  TRACE.h = Math.max(Math.round(rect.height), 160);
+  TRACE.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  traceCanvas.width = TRACE.w * TRACE.dpr;
+  traceCanvas.height = TRACE.h * TRACE.dpr;
+  // Leave room for the width of the road and for a wobbly line outside it
+  const margin = TRACE_ROAD + TRACE_SLACK * 2;
+  TRACE.scale = Math.min(TRACE.w / (TRACE_BOX.w + margin), TRACE.h / (TRACE_BOX.h + margin));
+  TRACE.ox = (TRACE.w - TRACE_BOX.w * TRACE.scale) / 2;
+  TRACE.oy = (TRACE.h - TRACE_BOX.h * TRACE.scale) / 2;
+  drawTrace();
+}
+
+function drawTrace() {
+  if (!TRACE.guide) return;
+  const { dpr, scale, ox, oy } = TRACE;
+  traceCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  traceCtx.clearRect(0, 0, TRACE.w, TRACE.h);
+  traceCtx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * ox, dpr * oy);
+  traceCtx.lineCap = 'round';
+  traceCtx.lineJoin = 'round';
+
+  traceCtx.strokeStyle = '#d2dcea';
+  traceCtx.lineWidth = TRACE_ROAD;
+  for (const stroke of TRACE.guide.strokes) traceCtx.stroke(stroke.shape);
+
+  if (!TRACE.scored) { // a green dot shows where each stroke starts
+    traceCtx.fillStyle = '#a7cfae';
+    for (const stroke of TRACE.guide.strokes) {
+      const [x, y] = stroke.points[0];
+      traceCtx.beginPath();
+      traceCtx.arc(x, y, TRACE_ROAD * 0.3, 0, Math.PI * 2);
+      traceCtx.fill();
+    }
+  }
+
+  traceCtx.strokeStyle = !TRACE.scored ? '#2f7df6' : TRACE.score >= 70 ? '#22b573' : '#ff9f1c';
+  traceCtx.lineWidth = TRACE_ROAD * 0.38;
+  for (const points of allStrokes()) {
+    if (!points.length) continue;
+    traceCtx.beginPath();
+    traceCtx.moveTo(points[0][0], points[0][1]);
+    for (let i = 1; i < points.length; i++) traceCtx.lineTo(points[i][0], points[i][1]);
+    if (points.length === 1) traceCtx.lineTo(points[0][0] + 0.01, points[0][1]);
+    traceCtx.stroke();
+  }
+}
+function allStrokes() {
+  return TRACE.drawing ? TRACE.strokes.concat([TRACE.drawing]) : TRACE.strokes;
+}
+
+/* ----- drawing ----- */
+// Points are kept in box units, so the line survives a resize or a rotate.
+function tracePoint(e) {
+  const rect = traceCanvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (TRACE.w / rect.width);
+  const y = (e.clientY - rect.top) * (TRACE.h / rect.height);
+  return [(x - TRACE.ox) / TRACE.scale, (y - TRACE.oy) / TRACE.scale];
+}
+traceCanvas.addEventListener('pointerdown', e => {
+  if (TRACE.scored) return;
+  e.preventDefault();
+  audio();
+  try { traceCanvas.setPointerCapture(e.pointerId); } catch (err) { /* capture is optional */ }
+  TRACE.drawing = [tracePoint(e)];
+  drawTrace();
+});
+traceCanvas.addEventListener('pointermove', e => {
+  if (!TRACE.drawing) return;
+  e.preventDefault();
+  const p = tracePoint(e);
+  const last = TRACE.drawing[TRACE.drawing.length - 1];
+  if (Math.hypot(p[0] - last[0], p[1] - last[1]) < 0.8) return;
+  TRACE.drawing.push(p);
+  drawTrace();
+});
+for (const type of ['pointerup', 'pointercancel']) {
+  traceCanvas.addEventListener(type, () => {
+    if (!TRACE.drawing) return;
+    TRACE.strokes.push(TRACE.drawing); // some digits take two strokes, like 4
+    TRACE.drawing = null;
+    sfx.tick();
+  });
+}
+
+/* ----- scoring ----- */
+function pathLength(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) total += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  return total;
+}
+// Evenly spaced points along the line: a fast-drawn straight bit then counts for as
+// much as a slow wobbly one, and a long jump between two pointer samples is filled in.
+function resample(points, step) {
+  const out = [points[0]];
+  let prev = points[0], carry = 0;
+  for (let i = 1; i < points.length; i++) {
+    const next = points[i];
+    let gap = Math.hypot(next[0] - prev[0], next[1] - prev[1]);
+    while (carry + gap >= step) {
+      const t = (step - carry) / gap;
+      prev = [prev[0] + (next[0] - prev[0]) * t, prev[1] + (next[1] - prev[1]) * t];
+      out.push(prev);
+      gap = Math.hypot(next[0] - prev[0], next[1] - prev[1]);
+      carry = 0;
+    }
+    carry += gap;
+    prev = next;
+  }
+  return out;
+}
+// How well `points` sit on `others`: right on the line scores 1, drifting off the
+// edge of the road fades to 0, so a neat line and a sloppy one don't both get full marks.
+function closeness(points, others, easy, reach) {
+  if (!points.length) return 0;
+  const easySq = easy * easy;
+  let total = 0;
+  for (const [x, y] of points) {
+    let best = Infinity;
+    for (const [ox, oy] of others) {
+      const dx = x - ox, dy = y - oy;
+      const d = dx * dx + dy * dy;
+      if (d < best) { best = d; if (best <= easySq) break; }
+    }
+    const away = Math.sqrt(best);
+    total += away <= easy ? 1 : Math.max(0, 1 - (away - easy) / (reach - easy));
+  }
+  return total / points.length;
+}
+function traceScoreFor(strokes) {
+  const easy = TRACE_ROAD * 0.25;            // this close to the middle of the road is full marks
+  const reach = TRACE_ROAD / 2 + TRACE_SLACK; // past here it counts for nothing
+  const mine = strokes.flatMap(s => resample(s, TRACE_STEP));
+  const coverage = closeness(TRACE.guide.points, mine, easy, reach); // did the whole digit get traced?
+  const neatness = closeness(mine, TRACE.guide.points, easy, reach); // did the line stay on it?
+  return Math.round(100 * coverage * neatness);
+}
+function scoreTrace() {
+  const drawn = allStrokes().filter(s => s.length > 1);
+  const ink = drawn.reduce((sum, s) => sum + pathLength(s), 0);
+  if (ink < TRACE.guide.length * 0.3) { // a dot or a stray tap isn't an attempt
+    const el = $('traceScore');
+    el.className = 'trace-score soft';
+    el.textContent = 'Draw along the whole grey number first!';
+    sfx.error();
+    return;
+  }
+
+  const score = traceScoreFor(drawn);
+  TRACE.score = score;
+  TRACE.scored = true;
+  const stars = score >= 85 ? '⭐⭐⭐' : score >= 70 ? '⭐⭐' : score >= 50 ? '⭐' : '✏️';
+  const words = score >= 85 ? 'Beautiful writing!' : score >= 70 ? 'Nicely traced!'
+    : score >= 50 ? 'Good try!' : 'Keep practising that one.';
+  const el = $('traceScore');
+  el.className = 'trace-score ' + (score >= 70 ? 'good' : 'soft');
+  el.innerHTML = `<span class="stars">${stars}</span>${score}% — ${words}`;
+  $('traceCheck').hidden = true;
+  $('traceNext').hidden = false;
+  drawTrace();
+  if (score >= 70) sfx.correct(); else sfx.rep();
+  later(() => say(`${score} out of 100. ${words}`), 300);
+}
+
+$('traceCheck').addEventListener('click', () => { audio(); scoreTrace(); });
+$('traceClear').addEventListener('click', () => { audio(); resetTrace(); });
+$('traceNext').addEventListener('click', () => { audio(); celebrate(); });
+window.addEventListener('resize', () => { if (!$('traceView').hidden) sizeTrace(); });
 
 /* ================= GAMES: shared frame ================= */
 // Harder tables earn more lives; 5 and 10 are the easiest
@@ -1224,6 +1527,7 @@ function startGame(key) {
   G.token++;
   G.score = 0;
   G.lives = startLives(S.table) + Math.max(0, S.max - 5); // plus a bonus life for each "Up to" step above 5
+  if (key === 'starswarm') G.lives = Math.ceil(G.lives * 2 / 3); // Star Swarm gets two thirds of the lives
   G.level = 1;
   G.time = 0;
   G.popups = [];
