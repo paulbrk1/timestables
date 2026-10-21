@@ -1409,7 +1409,7 @@ function scoreTrace() {
   TRACE.scored = true;
   const stars = score >= 85 ? '⭐⭐⭐' : score >= 70 ? '⭐⭐' : score >= 50 ? '⭐' : '✏️';
   const words = score >= 85 ? 'Beautiful writing!' : score >= 70 ? 'Nicely traced!'
-    : score >= 50 ? 'Good try!' : 'Keep practising that one.';
+    : score >= 50 ? 'Good try!' : 'Beautiful writing, is not what this is.';
   const el = $('traceScore');
   el.className = 'trace-score ' + (score >= 70 ? 'good' : 'soft');
   el.innerHTML = `<span class="stars">${stars}</span>${score}% — ${words}`;
@@ -1463,6 +1463,38 @@ function sweep(from, to, dur, type = 'square', vol = 0.12, delay = 0) {
   osc.connect(gain).connect(a.destination);
   osc.start(t);
   osc.stop(t + dur + 0.05);
+}
+// A second of white noise, made once and looped by anything that needs a hiss
+let noiseBuffer = null;
+function whiteNoise(a) {
+  if (!noiseBuffer || noiseBuffer.sampleRate !== a.sampleRate) {
+    noiseBuffer = a.createBuffer(1, a.sampleRate, a.sampleRate);
+    const data = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  }
+  const src = a.createBufferSource();
+  src.buffer = noiseBuffer;
+  src.loop = true;
+  return src;
+}
+// A burst of that noise, swept through a band-pass so it can hiss, rasp or crackle.
+// A low q leaves it broad and white; a high one narrows it towards a whistle.
+function noise(dur, vol = 0.1, from = 2600, to = 400, q = 0.8, delay = 0) {
+  const a = audio();
+  if (!a) return;
+  const t = a.currentTime + delay;
+  const src = whiteNoise(a);
+  const band = a.createBiquadFilter();
+  band.type = 'bandpass';
+  band.Q.value = q;
+  band.frequency.setValueAtTime(from, t);
+  band.frequency.exponentialRampToValueAtTime(to, t + dur);
+  const gain = a.createGain();
+  gain.gain.setValueAtTime(vol, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(band).connect(gain).connect(a.destination);
+  src.start(t);
+  src.stop(t + dur + 0.05);
 }
 const gameSfx = {
   jingle() { [523, 659, 784, 659, 784, 1047].forEach((f, i) => tone(f, 0.12, 'square', 0.07, i * 0.11)); },
@@ -2701,7 +2733,13 @@ const defAim    = () => Math.min(0.25 + 0.15 * (G.level - 1), 0.8);  // how far 
 const defShotSpeed = () => Math.min(225 + 15 * (G.level - 1), 340);
 
 const defSfx = {
-  laser()  { sweep(1700, 320, 0.12, 'sawtooth', 0.06); },
+  // A raspy zap: two sweeps a little out of tune so they buzz against each other,
+  // over a broad wash of white noise falling away with them
+  laser()  {
+    sweep(1700, 320, 0.12, 'sawtooth', 0.021);
+    sweep(1555, 288, 0.13, 'square', 0.013);
+    noise(0.75, 0.5076, 3400, 360, 0.55);
+  },
   hit()    { sweep(420, 80, 0.22, 'square', 0.09); },
   grab()   { sweep(220, 760, 0.25, 'sine', 0.08); },
   rescue() { [784, 988, 1319].forEach((f, i) => tone(f, 0.12, 'triangle', 0.16, i * 0.08)); },
