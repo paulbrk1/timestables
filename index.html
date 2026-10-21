@@ -1194,7 +1194,7 @@ const DIGIT_STROKES = {
   6: ['M74 12 C44 26 18 58 18 92 C18 118 36 132 52 132 C72 132 84 116 82 98 C80 78 58 66 42 74 C30 80 22 88 18 98'],
   7: ['M16 14 L84 14 L44 132'],
   8: ['M50 66 C26 58 20 38 30 24 C40 8 64 10 72 26 C80 42 72 58 50 66 C24 76 16 100 28 116 C40 132 66 130 74 114 C82 98 74 76 50 66'],
-  9: ['M80 46 C78 24 56 12 38 20 C20 28 14 50 26 64 C38 78 62 80 76 68 C82 62 80 52 80 46 L80 92 C80 118 66 132 44 134']
+  9: ['M80 46 C78 24 56 12 38 20 C20 28 14 50 26 64 C38 78 62 80 76 68 C82 62 80 52 80 46 L80 132']
 };
 const TRACE = {
   digit: 0, guide: null,
@@ -1291,16 +1291,6 @@ function drawTrace() {
   traceCtx.strokeStyle = '#d2dcea';
   traceCtx.lineWidth = TRACE_ROAD;
   for (const stroke of TRACE.guide.strokes) traceCtx.stroke(stroke.shape);
-
-  if (!TRACE.scored) { // a green dot shows where each stroke starts
-    traceCtx.fillStyle = '#a7cfae';
-    for (const stroke of TRACE.guide.strokes) {
-      const [x, y] = stroke.points[0];
-      traceCtx.beginPath();
-      traceCtx.arc(x, y, TRACE_ROAD * 0.3, 0, Math.PI * 2);
-      traceCtx.fill();
-    }
-  }
 
   traceCtx.strokeStyle = !TRACE.scored ? '#2f7df6' : TRACE.score >= 70 ? '#22b573' : '#ff9f1c';
   traceCtx.lineWidth = TRACE_ROAD * 0.38;
