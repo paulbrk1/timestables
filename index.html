@@ -1409,7 +1409,7 @@ function scoreTrace() {
   TRACE.scored = true;
   const stars = score >= 85 ? '⭐⭐⭐' : score >= 70 ? '⭐⭐' : score >= 50 ? '⭐' : '✏️';
   const words = score >= 85 ? 'Beautiful writing!' : score >= 70 ? 'Nicely traced!'
-    : score >= 50 ? 'Good try!' : 'Keep practising that one.';
+    : score >= 50 ? 'Good try!' : 'Beautiful writing, is not what this is.';
   const el = $('traceScore');
   el.className = 'trace-score ' + (score >= 70 ? 'good' : 'soft');
   el.innerHTML = `<span class="stars">${stars}</span>${score}% — ${words}`;
