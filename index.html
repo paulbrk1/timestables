@@ -1449,6 +1449,41 @@ const G = { token: 0, state: 'off', scale: 1, game: null, held: {}, touchX: null
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
 
+// Defender's zap is a burst of noise rather than a tone. Measured off the arcade
+// machine, its spectrum is flat to about 600Hz and then falls away at 6dB an octave,
+// which is exactly what a one-pole lowpass at 700Hz does to white noise. A couple of
+// seconds is baked once and each shot plays a random slice, so no two sound alike.
+let noiseBuf = null;
+function noiseBuffer(a) {
+  if (noiseBuf) return noiseBuf;
+  const n = Math.floor(a.sampleRate * 2);
+  noiseBuf = a.createBuffer(1, n, a.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  const k = 1 - Math.exp(-2 * Math.PI * 700 / a.sampleRate);
+  let p = 0, peak = 1e-6;
+  for (let i = 0; i < n; i++) {
+    p += k * ((Math.random() * 2 - 1) - p);
+    d[i] = p;
+    if (Math.abs(p) > peak) peak = Math.abs(p);
+  }
+  for (let i = 0; i < n; i++) d[i] /= peak;
+  return noiseBuf;
+}
+// A flat-topped burst of that noise: straight in, holding, then dropping away at the end.
+function noiseBurst(dur, vol = 0.12, delay = 0) {
+  const a = audio();
+  if (!a) return;
+  const t = a.currentTime + delay;
+  const src = a.createBufferSource();
+  src.buffer = noiseBuffer(a);
+  const gain = a.createGain();
+  gain.gain.setValueAtTime(vol, t);
+  gain.gain.setValueAtTime(vol, t + dur * 0.75);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(gain).connect(a.destination);
+  src.start(t, Math.random() * (2 - dur - 0.05));
+  src.stop(t + dur + 0.02);
+}
 function sweep(from, to, dur, type = 'square', vol = 0.12, delay = 0) {
   const a = audio();
   if (!a) return;
@@ -2695,13 +2730,18 @@ function defGap(a, b) {
 }
 // How hard the planet fights back. Everything that gets nastier as the waves go on is
 // gathered here, so the difficulty can be tuned in one place.
-const defHeat   = () => Math.min(1 + 0.2 * (G.level - 1), 2.9);      // how quickly they reload
+const defHeat   = () => Math.min(1.2 + 0.25 * (G.level - 1), 3.3);   // how quickly they reload
 const defVolley = () => G.level < 2 ? 1 : G.level < 5 ? 2 : 3;       // shots in a volley, later on
-const defAim    = () => Math.min(0.25 + 0.15 * (G.level - 1), 0.8);  // how far ahead they aim
-const defShotSpeed = () => Math.min(225 + 15 * (G.level - 1), 340);
+const defAim    = () => Math.min(0.4 + 0.15 * (G.level - 1), 0.85);  // how far ahead they aim
+const defShotSpeed = () => Math.min(250 + 16 * (G.level - 1), 360);  // always quicker than the ship's 235
+
+const DEF_LASER_LEN = 0.8;          // how long the zap rings on for
 
 const defSfx = {
-  laser()  { sweep(1700, 320, 0.12, 'sawtooth', 0.06); },
+  // The zap is two things at once: a bed of noise, and a tone diving through it a moment
+  // later. The tone's second harmonic is the bright streak you actually notice, which is
+  // why it reads an octave higher than the 1600Hz it starts from.
+  laser()  { noiseBurst(DEF_LASER_LEN, 0.09); sweep(1600, 800, 0.12, 'sawtooth', 0.1, 0.025); },
   hit()    { sweep(420, 80, 0.22, 'square', 0.09); },
   grab()   { sweep(220, 760, 0.25, 'sine', 0.08); },
   rescue() { [784, 988, 1319].forEach((f, i) => tone(f, 0.12, 'triangle', 0.16, i * 0.08)); },
@@ -3150,15 +3190,22 @@ const MoonDefender = {
       const p = this.player;
       drawPatrol(this.viewX(p.x), p.y, p.face, p.thrust);
     }
+    // A block of nine squares that starts out solid, flies apart and fades: hot white in
+    // the middle, cooling to yellow and then red at the corners.
     for (const b of this.booms) {
-      const age = (G.time - b.born) / b.dur;
-      const radius = (b.big ? 34 : 18) * age + 3;
+      const age = Math.min((G.time - b.born) / b.dur, 1);
+      const burst = 1 - (1 - age) ** 2;              // thrown out hard, then slowing
+      const cell = b.big ? 4 : 2.5;                  // one square of the three by three
+      const gap = cell + (b.big ? 216 : 120) * burst; // touching at first, then flung wide
       const x = this.viewX(b.x);
-      for (let i = 0; i < 10; i++) {
-        const angle = i / 10 * Math.PI * 2;
-        ctx.fillStyle = ['#ffd23f', '#ff3b3b', '#ffffff'][i % 3];
-        ctx.fillRect(x + Math.cos(angle) * radius - 2, b.y + Math.sin(angle) * radius - 2, 4, 4);
+      ctx.globalAlpha = (1 - age) ** 1.6;            // thinning out as it travels
+      for (let i = -1; i <= 1; i++) {
+        for (let j = -1; j <= 1; j++) {
+          ctx.fillStyle = ['#ffffff', '#ffd23f', '#ff3b3b'][Math.abs(i) + Math.abs(j)];
+          ctx.fillRect(x + i * gap - cell / 2, b.y + j * gap - cell / 2, cell, cell);
+        }
       }
+      ctx.globalAlpha = 1;
     }
     this.drawScanner();
   },
