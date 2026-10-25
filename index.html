@@ -474,6 +474,7 @@
         <button class="game-pick" data-game="starswarm"><canvas></canvas>Star Swarm</button>
         <button class="game-pick" data-game="lilyhop"><canvas></canvas>Lily Hop</button>
         <button class="game-pick" data-game="defender"><canvas></canvas>Moon Defender</button>
+        <button class="game-pick" data-game="climb"><canvas></canvas>Barrel Climb</button>
       </div>
     </div>
     <div id="gameView" hidden>
@@ -1551,7 +1552,8 @@ function startGame(key) {
   wrap.style.setProperty('--ar', `${game.width} / ${game.height}`);
   wrap.style.setProperty('--ratio', game.width / game.height);
   $('dpad').classList.toggle('shooter', !!game.usesFire && !game.flies);
-  $('dpad').classList.toggle('flyer', !!game.flies);
+  $('dpad').classList.toggle('flyer', !!game.flies || !!game.climbs);
+  $('dpad').querySelector('[data-action="fire"]').textContent = game.fireLabel || 'FIRE';
   $('gameHelp').textContent = helpText(game);
   $('overOverlay').hidden = true;
   $('pauseOverlay').hidden = true;
@@ -1587,11 +1589,13 @@ function startGame(key) {
 // Tell the player about the controls they actually have: keys, or the on-screen pad
 function helpText(game) {
   const touch = document.documentElement.classList.contains('touch');
-  const controls = !game.usesFire
-    ? `${game.verb} with the arrow ${touch ? 'buttons' : 'keys'}.`
-    : game.flies
-      ? (touch ? 'Fly with the arrows and tap FIRE.' : 'Fly with the arrow keys, fire with Space.')
-      : (touch ? 'Move with ◀ ▶ and tap FIRE.' : 'Move with ← →, fire with Space.');
+  const controls = game.climbs
+    ? (touch ? 'Walk with ◀ ▶, climb with ▲ ▼, tap JUMP.' : 'Walk with ← →, climb with ↑ ↓, jump with Space.')
+    : !game.usesFire
+      ? `${game.verb} with the arrow ${touch ? 'buttons' : 'keys'}.`
+      : game.flies
+        ? (touch ? 'Fly with the arrows and tap FIRE.' : 'Fly with the arrow keys, fire with Space.')
+        : (touch ? 'Move with ◀ ▶ and tap FIRE.' : 'Move with ← →, fire with Space.');
   return `${controls} ${game.help}`;
 }
 // Keeps the board short enough that the on-screen pad stays visible: below it normally,
@@ -3261,8 +3265,610 @@ const MoonDefender = {
   }
 };
 
+/* ================= BARREL CLIMB ================= */
+// A Donkey Kong clone — the girder screen. Tilted girders are stacked up the board and
+// joined by ladders, with an ape at the top lobbing barrels down them. A barrel rolls to
+// the low end of its girder and drops onto the next, so every girder has to be crossed
+// uphill, straight into the traffic. Jump one as it passes for points, or take a hammer
+// and smash it — though the hammer is far too heavy to climb or jump with. Barrels that
+// make it all the way down roll into the oil drum, which every so often spits out a
+// fireball that comes hunting. Reach the ledge at the top and the girl is rescued.
+const BC_W = 440, BC_H = 540;
+// Each girder is a straight run between two points, tilting 12px end to end. They lean
+// alternately, so a barrel zig-zags down the board and the climb is always against it.
+const BC_GIRDERS = [
+  { x0: 0,   y0: 502, x1: 440, y1: 508 },  // 0: the ground, tipping right into the oil drum
+  { x0: 60,  y0: 445, x1: 440, y1: 433 },  // 1
+  { x0: 0,   y0: 367, x1: 380, y1: 379 },  // 2
+  { x0: 60,  y0: 313, x1: 440, y1: 301 },  // 3
+  { x0: 0,   y0: 236, x1: 380, y1: 248 },  // 4
+  { x0: 60,  y0: 182, x1: 440, y1: 170 },  // 5
+  { x0: 0,   y0: 104, x1: 380, y1: 116 },  // 6: the ape's girder
+  { x0: 256, y0: 44,  x1: 352, y1: 44  }   // 7: the ledge at the very top
+];
+// A ladder runs up from girder `from` to girder `to`. The two at 220 are short cuts; the
+// rest sit at the high end of each girder, so the way up is always into the barrels.
+const BC_LADDERS = [
+  { x: 120, from: 0, to: 1 },
+  { x: 350, from: 1, to: 2 },
+  { x: 80,  from: 2, to: 3 },
+  { x: 220, from: 2, to: 3 },
+  { x: 360, from: 3, to: 4 },
+  { x: 80,  from: 4, to: 5 },
+  { x: 220, from: 4, to: 5 },
+  { x: 360, from: 5, to: 6 },
+  { x: 300, from: 6, to: 7 }
+];
+const BC_HAMMERS = [{ row: 2, x: 290 }, { row: 4, x: 140 }];
+const BC_TOP = BC_GIRDERS.length - 1;   // the ledge: standing on it wins the screen
+const BC_DRUM_X = 412, BC_APE_X = 64, BC_GIRL_X = 312;
+const BC_WALK = 92, BC_CLIMB = 68, BC_JUMP = 285, BC_GRAV = 1150;
+// A jump rises 35px and hangs for half a second. It has to clear a barrel comfortably —
+// the window to press it is about a fifth of a second — while staying well under the
+// 49px between girders, so the ladders are always the only way up.
+const BC_HEAD = 26;                     // how tall the climber is, for running into things
+
+// Where the surface of a girder sits at a given x
+const bcGirderY = (i, x) => {
+  const g = BC_GIRDERS[i];
+  return g.y0 + (g.y1 - g.y0) * clamp((x - g.x0) / (g.x1 - g.x0), 0, 1);
+};
+const bcDownhill = i => (BC_GIRDERS[i].y1 > BC_GIRDERS[i].y0 ? 1 : -1);
+const bcOn = (i, x) => x >= BC_GIRDERS[i].x0 && x <= BC_GIRDERS[i].x1;
+// What a falling thing lands on: the highest girder whose surface it passed through on
+// this step. Rolling off an end puts x outside that girder's span, so it cannot re-land.
+function bcLanding(x, from, to) {
+  let best = -1, bestY = Infinity;
+  for (let i = 0; i < BC_GIRDERS.length; i++) {
+    if (!bcOn(i, x)) continue;
+    const y = bcGirderY(i, x);
+    if (y >= from - 0.5 && y <= to && y < bestY) { best = i; bestY = y; }
+  }
+  return best;
+}
+
+const climbSfx = {
+  start() { [392, 523, 659, 784, 880, 1047].forEach((f, i) => tone(f, 0.11, 'square', 0.07, i * 0.1)); },
+  jump()  { sweep(240, 640, 0.15, 'square', 0.07); },
+  toss()  { tone(150, 0.09, 'square', 0.06); },
+  drop()  { tone(90, 0.07, 'triangle', 0.07); },
+  grab()  { [784, 1047, 1319].forEach((f, i) => tone(f, 0.1, 'triangle', 0.14, i * 0.07)); },
+  smash() { noiseBurst(0.14, 0.13); tone(130, 0.14, 'square', 0.1); },
+  death() { sweep(620, 70, 1, 'square', 0.12); }
+};
+
+/* ----- the things on the screen, drawn at a plain x and y so the preview can use them too ----- */
+// A girder: two flanges with a zig-zag lattice between them, laid along the run.
+function drawGirder(g) {
+  const len = Math.hypot(g.x1 - g.x0, g.y1 - g.y0);
+  ctx.save();
+  ctx.translate(g.x0, g.y0);
+  ctx.rotate(Math.atan2(g.y1 - g.y0, g.x1 - g.x0));
+  ctx.fillStyle = '#ff5c5c';
+  ctx.fillRect(0, 0, len, 3);
+  ctx.fillRect(0, 8, len, 3);
+  ctx.strokeStyle = '#c03a3a';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  for (let u = 0; u + 16 <= len; u += 16) {
+    ctx.moveTo(u, 3);
+    ctx.lineTo(u + 8, 8);
+    ctx.lineTo(u + 16, 3);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+function drawRungs(x, top, foot) {
+  ctx.strokeStyle = '#8fa8d8';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(x - 6, top); ctx.lineTo(x - 6, foot);
+  ctx.moveTo(x + 6, top); ctx.lineTo(x + 6, foot);
+  ctx.stroke();
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  for (let y = top + 7; y < foot - 2; y += 9) { ctx.moveTo(x - 6, y); ctx.lineTo(x + 6, y); }
+  ctx.stroke();
+}
+// The climber, standing on his feet at x, y: red cap and shirt, blue dungarees and a
+// moustache. `step` winds his legs and arms round as he walks or climbs.
+function drawClimber(x, y, face, pose, step) {
+  const swing = Math.sin(step * Math.PI * 2);
+  ctx.save();
+  ctx.translate(x, y);
+  if (pose === 'dead') ctx.rotate(step); else ctx.scale(face, 1);
+  ctx.fillStyle = '#5a2d0c';                        // boots
+  if (pose === 'climb') {
+    ctx.fillRect(-7, -4, 6, 4);
+    ctx.fillRect(1, -4, 6, 4);
+  } else {
+    const lead = pose === 'jump' ? 4 : swing * 4;
+    ctx.fillRect(-7 + lead, -4, 6, 4);
+    ctx.fillRect(1 - lead, -4, 6, 4);
+  }
+  ctx.fillStyle = '#2f4fd8';                        // dungarees
+  ctx.fillRect(-6, -13, 12, 9);
+  ctx.fillStyle = '#ff3b3b';                        // shirt
+  ctx.fillRect(-7, -19, 14, 6);
+  ctx.fillStyle = '#2f4fd8';                        // and its braces
+  ctx.fillRect(-4.5, -19, 2.5, 6);
+  ctx.fillRect(2, -19, 2.5, 6);
+  ctx.fillStyle = '#f0b48a';                        // arms
+  if (pose === 'climb') {
+    ctx.fillRect(-10, -23, 4, 8);
+    ctx.fillRect(6, -23, 4, 8);
+  } else if (pose === 'jump') {
+    ctx.fillRect(-11, -21, 5, 4);
+    ctx.fillRect(6, -21, 5, 4);
+  } else {
+    ctx.fillRect(-10 + swing * 2, -18, 4, 6);
+    ctx.fillRect(6 + swing * 2, -18, 4, 6);
+  }
+  ctx.fillRect(-5, -26, 10, 7);                     // head
+  ctx.fillStyle = '#5a2d0c';                        // an eye and the moustache
+  ctx.fillRect(1.5, -24.5, 2, 2);
+  ctx.fillRect(0.5, -21.5, 5, 2);
+  ctx.fillStyle = '#ff3b3b';                        // cap, peak out in front
+  ctx.fillRect(-6, -29, 12, 3);
+  ctx.fillRect(1, -26.5, 8, 2.5);
+  ctx.restore();
+}
+// The ape, sat on his girder thumping his chest
+function drawApe(x, y, beat) {
+  const arm = Math.sin(beat * Math.PI * 2) * 3;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = '#8b5a2b';
+  ctx.fillRect(-19, -12, 13, 12);                   // legs
+  ctx.fillRect(6, -12, 13, 12);
+  roundRect(-20, -38, 40, 28, 10); ctx.fill();      // body
+  roundRect(-30, -36 + arm, 11, 23, 5); ctx.fill(); // arms, beating out of step
+  roundRect(19, -36 - arm, 11, 23, 5); ctx.fill();
+  roundRect(-16, -58, 32, 22, 10); ctx.fill();      // head
+  ctx.fillStyle = '#f0c9a0';
+  roundRect(-12, -33, 24, 21, 9); ctx.fill();       // chest
+  roundRect(-11, -46, 22, 11, 6); ctx.fill();       // muzzle
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-11, -55, 8, 7);
+  ctx.fillRect(3, -55, 8, 7);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(-7, -54, 3.5, 5);                    // eyes, both on you
+  ctx.fillRect(4, -54, 3.5, 5);
+  ctx.fillRect(-4, -43, 3, 2);                      // nostrils
+  ctx.fillRect(1, -43, 3, 2);
+  ctx.fillRect(-7, -39, 14, 2);                     // and a grin
+  ctx.restore();
+}
+// The girl on the top ledge, hopping on the spot
+function drawGirl(x, y, t) {
+  ctx.save();
+  ctx.translate(x, y - Math.abs(Math.sin(t * 3)) * 2);
+  ctx.fillStyle = '#ff5ce1';
+  ctx.beginPath();
+  ctx.moveTo(-8, 0); ctx.lineTo(8, 0); ctx.lineTo(4, -14); ctx.lineTo(-4, -14);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#f0b48a';
+  ctx.fillRect(-9, -20, 3, 7);
+  ctx.fillRect(6, -20, 3, 7);
+  ctx.fillRect(-4, -22, 8, 8);
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillRect(-6, -26, 12, 5);
+  ctx.fillRect(-7, -24, 3, 9);
+  ctx.fillRect(4, -24, 3, 9);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(-2.5, -19, 1.8, 1.8);
+  ctx.fillRect(0.8, -19, 1.8, 1.8);
+  ctx.restore();
+}
+// A barrel, drawn at its middle. The staves march round the cask as it rolls.
+function drawBarrel(x, y, spin) {
+  ctx.save();
+  ctx.translate(x, y);
+  roundRect(-9, -7, 18, 14, 5);
+  ctx.fillStyle = '#c68a4e';
+  ctx.fill();
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = '#8b5a2b';
+  for (let k = 0; k < 3; k++) {
+    const u = (((spin + k / 3) % 1) + 1) % 1;
+    ctx.fillRect(-11 + u * 22, -7, 2.5, 14);
+  }
+  ctx.restore();
+  ctx.fillStyle = '#6b4220';                        // the hoops at either end
+  ctx.fillRect(-9, -7, 2.5, 14);
+  ctx.fillRect(6.5, -7, 2.5, 14);
+  ctx.restore();
+}
+// A fireball: a lick of flame with two cold eyes in it
+function drawFlame(x, y, t) {
+  const lick = Math.sin(t * 14) * 2;
+  ctx.fillStyle = '#ff9f1c';
+  ctx.beginPath();
+  ctx.moveTo(x, y - 13 - lick);
+  ctx.quadraticCurveTo(x + 10, y - 4, x + 7, y + 4);
+  ctx.quadraticCurveTo(x, y + 9, x - 7, y + 4);
+  ctx.quadraticCurveTo(x - 10, y - 4, x, y - 13 - lick);
+  ctx.fill();
+  ctx.fillStyle = '#ffd23f';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 1, 4.5, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#3de3ff';
+  ctx.fillRect(x - 4.5, y - 4, 3, 3);
+  ctx.fillRect(x + 1.5, y - 4, 3, 3);
+}
+// The oil drum the barrels end up in, with flames licking out of the top. `flare` is how
+// far they leap, which is all the way just as a barrel goes in.
+function drawDrum(x, y, t, flare) {
+  ctx.fillStyle = '#2b5fd9';
+  roundRect(x - 13, y - 26, 26, 26, 4);
+  ctx.fill();
+  ctx.strokeStyle = '#1b3f99';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x - 13, y - 20); ctx.lineTo(x + 13, y - 20);
+  ctx.moveTo(x - 13, y - 7); ctx.lineTo(x + 13, y - 7);
+  ctx.stroke();
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = `900 11px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('OIL', x, y - 13.5);
+  for (let k = -1; k <= 1; k++) {
+    const h = (9 + Math.sin(t * 9 + k * 2) * 4) * (1 + flare * 1.6);
+    ctx.fillStyle = k === 0 ? '#ffd23f' : '#ff9f1c';
+    ctx.beginPath();
+    ctx.moveTo(x + k * 7 - 4.5, y - 25);
+    ctx.quadraticCurveTo(x + k * 7, y - 25 - h, x + k * 7 + 4.5, y - 25);
+    ctx.fill();
+  }
+}
+// The hammer, its handle hanging from the head at the point it is drawn
+function drawMallet(x, y, angle) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.fillStyle = '#8b5a2b';
+  ctx.fillRect(-2, 0, 4, 16);
+  ctx.fillStyle = '#ffd23f';
+  roundRect(-9, -10, 18, 11, 3);
+  ctx.fill();
+  ctx.fillStyle = '#e0a800';
+  ctx.fillRect(-9, -10, 4, 11);
+  ctx.fillRect(5, -10, 4, 11);
+  ctx.restore();
+}
+
+const BarrelClimb = {
+  width: BC_W,
+  height: BC_H,
+  climbs: true,        // walks, climbs ladders and jumps, so it gets the whole pad
+  tapAction: 'fire',
+  fireLabel: 'JUMP',
+  readyAt: { x: BC_W / 2, y: 290 },
+  help: 'Jump the barrels, climb the girders and reach the top!',
+  startSound: () => climbSfx.start(),
+
+  newGame() { this.startLevel(); },
+  startLevel() {
+    // Barrels stay slower than the BC_WALK boots however high the level goes. Let them get
+    // faster than he walks and climbing uphill into the flow stops being possible at all, so
+    // the screens get harder by being busier — more barrels, more of them taking the ladders
+    // down onto his head, and more fireballs — rather than quicker.
+    this.rollSpeed = Math.min(72 + 3 * (G.level - 1), 88);
+    this.throwEvery = Math.max(1.1, 2.9 - 0.2 * (G.level - 1));
+    this.maxBarrels = Math.min(5 + G.level, 11);
+    this.maxFlames = Math.min(1 + Math.floor((G.level - 1) / 2), 4);
+    this.ladderOdds = Math.min(0.2 + 0.05 * (G.level - 1), 0.55);
+    this.resetRound();
+  },
+  resetRound() {
+    this.hero = {
+      x: 300, y: bcGirderY(0, 300), row: 0, mode: 'walk', ladder: null,
+      vx: 0, vy: 0, face: -1, step: 0, hammer: 0, cleared: null
+    };
+    this.barrels = [];
+    this.flames = [];
+    this.hammers = BC_HAMMERS.map(m => ({ x: m.x, y: bcGirderY(m.row, m.x) - 20, held: false }));
+    this.throwT = 1.8;
+    this.beat = 0;
+    this.flare = 0;
+    this.bonus = 1500;
+    this.bonusT = 0;
+    // No fireball to begin with. They climb out of the drum as the barrels feed it, so the
+    // first seconds of a round are his to get moving in — a fireball waiting by the drum at
+    // the whistle would be bearing down on him before he had taken a step.
+    this.seedBarrels();
+  },
+  // Open with the ape already at it a while: a barrel part way down each of the upper
+  // girders. A barrel takes half a minute to work its way to the bottom, so starting the
+  // board truly empty leaves him nothing to dodge — and the bonus draining — for the first
+  // half of the climb. The two lowest girders are left clear to get moving on.
+  seedBarrels() {
+    for (let row = 6; row >= 3; row--) {
+      const g = BC_GIRDERS[row];
+      const x = rand(g.x0 + 40, g.x1 - 40);
+      this.barrels.push({
+        x, y: bcGirderY(row, x) - 7, row, dir: bcDownhill(row),
+        state: 'roll', vy: 0, spin: rand(0, 6), ladder: null, done: false
+      });
+    }
+  },
+
+  update(dt) {
+    this.beat += dt * 1.6;
+    this.flare = Math.max(0, this.flare - dt * 2.2);
+    if ((this.bonusT += dt) >= 2) { this.bonusT -= 2; this.bonus = Math.max(0, this.bonus - 100); }
+    if ((this.throwT -= dt) <= 0) {
+      this.throwT = this.throwEvery * rand(0.8, 1.3);
+      if (this.barrels.length < this.maxBarrels) this.tossBarrel();
+    }
+    this.moveHero(dt);
+    for (const b of this.barrels) this.rollBarrel(b, dt);
+    for (const f of this.flames) this.moveFlame(f, dt);
+    const dead = this.struck();
+    this.barrels = this.barrels.filter(b => !b.done);
+    this.flames = this.flames.filter(f => !f.done);
+    if (dead) return;
+    if (this.hero.row === BC_TOP) this.rescue();
+  },
+  rescue() {
+    const prize = 1000 + this.bonus;
+    addScore(prize);
+    popup(BC_GIRL_X, 22, `+${prize} rescued!`, '#ffd23f');
+    levelCleared();
+  },
+  die() {
+    climbSfx.death();
+    loseLife(1.5);
+  },
+
+  /* ----- the climber ----- */
+  moveHero(dt) {
+    const h = this.hero;
+    const move = (G.held.right ? 1 : 0) - (G.held.left ? 1 : 0);
+    const lift = (G.held.up ? 1 : 0) - (G.held.down ? 1 : 0);
+    if (h.hammer > 0) h.hammer = Math.max(0, h.hammer - dt);
+
+    if (h.mode === 'climb') {
+      const l = h.ladder;
+      const top = bcGirderY(l.to, l.x), foot = bcGirderY(l.from, l.x);
+      h.y = clamp(h.y - lift * BC_CLIMB * dt, top, foot);
+      h.step += Math.abs(lift) * dt * 4;
+      if (lift > 0 && h.y <= top) { h.mode = 'walk'; h.row = l.to; h.ladder = null; }
+      else if (lift < 0 && h.y >= foot) { h.mode = 'walk'; h.row = l.from; h.ladder = null; }
+      return;
+    }
+    if (h.mode === 'jump') {
+      const was = h.y;
+      h.vy += BC_GRAV * dt;
+      h.y += h.vy * dt;
+      h.x = clamp(h.x + h.vx * dt, 8, BC_W - 8);
+      this.scoreJumps();
+      if (h.vy > 0) {
+        const row = bcLanding(h.x, was, h.y);
+        if (row >= 0) {
+          h.row = row;
+          h.y = bcGirderY(row, h.x);
+          h.mode = 'walk';
+          h.vy = 0;
+          h.cleared = null;
+        }
+      }
+      this.grabHammer();
+      return;
+    }
+    if (move) { h.face = move; h.step += dt * 6; }
+    const g = BC_GIRDERS[h.row];
+    h.x = clamp(h.x + move * BC_WALK * dt, g.x0 + 6, g.x1 - 6);
+    h.y = bcGirderY(h.row, h.x);
+    // A ladder underfoot or overhead — but not with a hammer filling both hands
+    if (lift && !h.hammer) {
+      const l = BC_LADDERS.find(k => Math.abs(k.x - h.x) < 10 && (lift > 0 ? k.from === h.row : k.to === h.row));
+      if (l) {
+        h.mode = 'climb';
+        h.ladder = l;
+        h.x = l.x;
+        h.y = clamp(h.y - lift * 2, bcGirderY(l.to, l.x), bcGirderY(l.from, l.x));
+      }
+    }
+    this.grabHammer();
+  },
+  press(action) {
+    const h = this.hero;
+    if (action !== 'fire' || h.mode !== 'walk' || h.hammer > 0) return;
+    h.mode = 'jump';
+    h.vy = -BC_JUMP;
+    h.vx = ((G.held.right ? 1 : 0) - (G.held.left ? 1 : 0)) * BC_WALK;
+    h.cleared = new Set();
+    climbSfx.jump();
+  },
+  // A barrel that passes under the boots while he is in the air is worth something
+  scoreJumps() {
+    const h = this.hero;
+    for (const b of this.barrels) {
+      if (h.cleared.has(b) || Math.abs(b.x - h.x) > 18 || h.y > b.y - 5) continue;
+      h.cleared.add(b);
+      addScore(100);
+      popup(h.x, h.y - 36, 100, '#ffd23f');
+      tone(880, 0.08, 'square', 0.08);
+    }
+  },
+  grabHammer() {
+    const h = this.hero;
+    for (const m of this.hammers) {
+      if (m.held || Math.abs(m.x - h.x) > 14 || m.y + 10 < h.y - BC_HEAD || m.y - 10 > h.y) continue;
+      m.held = true;
+      h.hammer = 7;
+      climbSfx.grab();
+      popup(m.x, m.y - 18, 'SMASH!', '#ffd23f');
+    }
+  },
+  // The hammer swings overhead and then down in front, five times a second
+  swing() {
+    const h = this.hero;
+    return Math.floor(h.hammer * 5) % 2
+      ? { x: h.x, y: h.y - 40, angle: 0 }
+      : { x: h.x + h.face * 17, y: h.y - 13, angle: h.face * Math.PI / 2 };
+  },
+
+  /* ----- the barrels ----- */
+  tossBarrel() {
+    const x = BC_APE_X + 34;
+    this.barrels.push({
+      x, y: bcGirderY(6, x) - 7, row: 6, dir: bcDownhill(6),
+      state: 'roll', vy: 0, spin: 0, ladder: null, done: false
+    });
+    climbSfx.toss();
+  },
+  rollBarrel(b, dt) {
+    if (b.state === 'fall') {
+      const was = b.y + 7;
+      b.vy = Math.min(b.vy + 900 * dt, 420);
+      b.y += b.vy * dt;
+      b.spin += dt * 1.5;
+      const row = bcLanding(b.x, was, b.y + 7);
+      if (row >= 0) {
+        b.row = row;
+        b.y = bcGirderY(row, b.x) - 7;
+        b.dir = bcDownhill(row);
+        b.state = 'roll';
+        b.vy = 0;
+        climbSfx.drop();
+      } else if (b.y > BC_H + 20) b.done = true;
+      return;
+    }
+    if (b.state === 'ladder') {         // sliding down a ladder instead of riding to the end
+      b.y += 80 * dt;
+      b.spin += dt * 1.2;
+      const foot = bcGirderY(b.ladder.from, b.x) - 7;
+      if (b.y >= foot) {
+        b.y = foot;
+        b.row = b.ladder.from;
+        b.dir = bcDownhill(b.row);
+        b.ladder = null;
+        b.state = 'roll';
+      }
+      return;
+    }
+    const was = b.x;
+    b.x += b.dir * this.rollSpeed * dt;
+    b.spin += b.dir * this.rollSpeed * dt / 28;
+    const g = BC_GIRDERS[b.row];
+    if (b.x < g.x0 || b.x > g.x1) { b.state = 'fall'; b.vy = 0; return; }
+    b.y = bcGirderY(b.row, b.x) - 7;
+    if (b.row === 0 && Math.abs(b.x - BC_DRUM_X) < 12) { this.intoDrum(); b.done = true; return; }
+    for (const l of BC_LADDERS) {
+      if (l.to !== b.row || (was - l.x) * (b.x - l.x) > 0) continue;
+      if (Math.random() < this.ladderOdds) { b.state = 'ladder'; b.ladder = l; b.x = l.x; }
+      break;
+    }
+  },
+  intoDrum() {
+    this.flare = 1;
+    if (this.flames.length < this.maxFlames && Math.random() < 0.5) this.spawnFlame();
+  },
+
+  /* ----- the fireballs ----- */
+  spawnFlame() {
+    this.flames.push({
+      x: BC_DRUM_X, y: bcGirderY(0, BC_DRUM_X) - 8, row: 0, dir: -1,
+      state: 'walk', ladder: null, climb: 0, think: rand(0.6, 1.6), t: Math.random() * 6, done: false
+    });
+  },
+  // Fireballs patrol their girder and take whichever ladder leads towards the climber
+  moveFlame(f, dt) {
+    f.t += dt;
+    const speed = Math.min(48 + 4 * (G.level - 1), 84);
+    if (f.state === 'ladder') {
+      const top = bcGirderY(f.ladder.to, f.x) - 8, foot = bcGirderY(f.ladder.from, f.x) - 8;
+      f.y = clamp(f.y + f.climb * speed * 0.8 * dt, top, foot);
+      if (f.climb < 0 && f.y <= top) { f.row = f.ladder.to; f.state = 'walk'; f.ladder = null; }
+      else if (f.climb > 0 && f.y >= foot) { f.row = f.ladder.from; f.state = 'walk'; f.ladder = null; }
+      return;
+    }
+    const was = f.x;
+    const g = BC_GIRDERS[f.row];
+    f.x = clamp(f.x + f.dir * speed * dt, g.x0 + 6, g.x1 - 6);
+    f.y = bcGirderY(f.row, f.x) - 8;
+    if (f.x <= g.x0 + 6 || f.x >= g.x1 - 6) f.dir = -f.dir;
+    if ((f.think -= dt) <= 0) {
+      f.think = rand(1.2, 3);
+      if (Math.random() < 0.35) f.dir = -f.dir;
+    }
+    const want = Math.sign(this.hero.row - f.row);
+    if (!want) return;
+    for (const l of BC_LADDERS) {
+      if (l.to === BC_TOP || (was - l.x) * (f.x - l.x) > 0) continue;   // the top ledge is hers alone
+      if (want > 0 && l.from === f.row) { f.state = 'ladder'; f.ladder = l; f.climb = -1; f.x = l.x; return; }
+      if (want < 0 && l.to === f.row) { f.state = 'ladder'; f.ladder = l; f.climb = 1; f.x = l.x; return; }
+    }
+  },
+
+  // Everything the climber can run into, and everything the hammer can flatten
+  struck() {
+    const h = this.hero;
+    const swing = h.hammer > 0 ? this.swing() : null;
+    const smashed = (x, y) => swing && Math.abs(x - swing.x) < 18 && Math.abs(y - swing.y) < 16;
+    const hits = (x, y, rx, ry) => Math.abs(x - h.x) < rx + 8 && y + ry > h.y - BC_HEAD && y - ry < h.y;
+
+    // Half way up a ladder he is down between the girders, so a barrel rolling along one
+    // sweeps over his head. Only a barrel that has taken the ladder itself can catch him
+    // there. The fireballs climb after him though, so a ladder is shelter, never a hiding place.
+    const sheltered = h.mode === 'climb';
+    for (const b of this.barrels) {
+      if (smashed(b.x, b.y)) { this.flatten(b, 300); continue; }
+      if (sheltered && b.state === 'roll') continue;
+      if (hits(b.x, b.y, 9, 7)) { this.die(); return true; }
+    }
+    for (const f of this.flames) {
+      if (smashed(f.x, f.y)) { this.flatten(f, 500); continue; }
+      if (hits(f.x, f.y, 7, 7)) { this.die(); return true; }
+    }
+    return false;
+  },
+  flatten(thing, points) {
+    thing.done = true;
+    addScore(points);
+    popup(thing.x, thing.y - 16, points, '#ffd23f');
+    climbSfx.smash();
+  },
+
+  draw() {
+    ctx.fillStyle = '#05060f';
+    ctx.fillRect(0, 0, BC_W, BC_H);
+    for (const l of BC_LADDERS) drawRungs(l.x, bcGirderY(l.to, l.x), bcGirderY(l.from, l.x) + 2);
+    for (const g of BC_GIRDERS) drawGirder(g);
+    drawDrum(BC_DRUM_X, bcGirderY(0, BC_DRUM_X), G.time, this.flare);
+    drawApe(BC_APE_X, bcGirderY(6, BC_APE_X), this.beat);
+    drawGirl(BC_GIRL_X, BC_GIRDERS[BC_TOP].y0, G.time);
+    for (const m of this.hammers) if (!m.held) drawMallet(m.x, m.y, Math.sin(G.time * 3) * 0.3);
+    for (const b of this.barrels) drawBarrel(b.x, b.y, b.spin);
+    for (const f of this.flames) drawFlame(f.x, f.y, f.t);
+
+    const h = this.hero;
+    if (G.state === 'dying') {        // knocked over, and tipping onto his back
+      const k = 1 - G.timer / G.dyingTime;
+      drawClimber(h.x, h.y - Math.sin(k * Math.PI) * 14, h.face, 'dead', k * Math.PI * 2);
+    } else {
+      drawClimber(h.x, h.y, h.face, h.mode, h.step);
+      if (h.hammer > 0) {
+        const s = this.swing();
+        drawMallet(s.x, s.y, s.angle);
+      }
+    }
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = `900 16px ${FONT}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`BONUS ${this.bonus}`, 12, 20);
+  }
+};
+
 // Add a game here and give it a matching PREVIEWS entry and a .game-pick button.
-const GAMES = { munchy: Munchy, starswarm: StarSwarm, lilyhop: LilyHop, defender: MoonDefender };
+const GAMES = { munchy: Munchy, starswarm: StarSwarm, lilyhop: LilyHop, defender: MoonDefender, climb: BarrelClimb };
 
 /* ----- game picker previews ----- */
 const PREVIEWS = {
@@ -3307,6 +3913,19 @@ const PREVIEWS = {
     drawPatrol(58, 44, 1, 1);
     ctx.fillStyle = '#ffd23f';
     ctx.fillRect(74, 42.5, 46, 3);
+  },
+  climb() {
+    drawGirder({ x0: 0, y0: 46, x1: 200, y1: 54 });
+    drawGirder({ x0: 6, y0: 92, x1: 200, y1: 84 });
+    drawRungs(152, 53, 88);
+    ctx.save();
+    ctx.scale(0.62, 0.62);          // the ape is life-size on the board and too big here
+    drawApe(54, 74, 0.25);
+    ctx.restore();
+    drawGirl(172, 53, 1);
+    drawBarrel(104, 44, 0.2);
+    drawBarrel(56, 83, 0.6);
+    drawClimber(116, 89, -1, 'walk', 0.25);
   }
 };
 function drawPreviews() {
