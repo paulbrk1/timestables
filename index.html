@@ -330,6 +330,13 @@
   .stick .down { bottom: 8px; left: 50%; transform: translateX(-50%); }
   .stick .left { left: 8px; top: 50%; transform: translateY(-50%); }
   .stick .right { right: 8px; top: 50%; transform: translateY(-50%); }
+  /* The corners, shown only where the game acts on them: hold one and both directions go in */
+  .stick .diag { display: none; font-size: .56rem; opacity: .8; }
+  .dpad.eight .stick .diag { display: block; }
+  .stick .nw { top: 21%; left: 21%; }
+  .stick .ne { top: 21%; right: 21%; }
+  .stick .sw { bottom: 21%; left: 21%; }
+  .stick .se { bottom: 21%; right: 21%; }
   /* A game that only runs side to side says so, rather than offering an up that does nothing */
   .dpad.sideways .stick .up, .dpad.sideways .stick .down { display: none; }
   .knob {
@@ -523,6 +530,10 @@
           <span class="hint down">▼</span>
           <span class="hint left">◀</span>
           <span class="hint right">▶</span>
+          <span class="hint diag nw">◤</span>
+          <span class="hint diag ne">◥</span>
+          <span class="hint diag sw">◣</span>
+          <span class="hint diag se">◢</span>
           <div class="knob" id="stickKnob"></div>
         </div>
         <button class="fire" data-action="fire" aria-label="Fire">FIRE</button>
@@ -1574,11 +1585,13 @@ function startGame(key) {
   const wrap = $('gameWrap');
   wrap.style.setProperty('--ar', `${game.width} / ${game.height}`);
   wrap.style.setProperty('--ratio', game.width / game.height);
-  // Only a game with something to fire shows the FIRE buttons, and only the game that runs
-  // side to side drops the up and down arrows off the stick face.
+  // Only a game with something to fire shows the FIRE buttons; the game that runs side to
+  // side drops the up and down arrows off the stick face, and the rest get the corners.
   const pad = $('dpad');
+  const sideways = !!game.usesFire && !game.flies;   // Moon Defender only runs left and right
   pad.classList.toggle('has-fire', !!game.usesFire || !!game.climbs);
-  pad.classList.toggle('sideways', !!game.usesFire && !game.flies);
+  pad.classList.toggle('sideways', sideways);
+  pad.classList.toggle('eight', !game.stepped && !sideways);
   for (const b of pad.querySelectorAll('.fire')) b.textContent = game.fireLabel || 'FIRE';
   $('gameHelp').textContent = helpText(game);
   $('overOverlay').hidden = true;
@@ -2169,6 +2182,7 @@ const Munchy = {
   height: ROWS * T,
   readyAt: { x: 14 * T, y: 18.5 * T },
   verb: 'Steer',
+  stepped: true,   // one queued turn at a time, so the stick hands it a single direction
   help: 'Eat all the dots and dodge the slimes!',
   startSound: () => munchSfx.start(),
   newGame() { this.startLevel(); },
@@ -2558,6 +2572,7 @@ const LilyHop = {
   height: 12 * FT,
   readyAt: { x: 6.5 * FT, y: 5.5 * FT },
   verb: 'Hop',
+  stepped: true,   // one hop per press, so a corner would be two hops at once
   help: 'Dodge the traffic, ride the river, and fill all 4 lily pads!',
   tapAction: 'up', // on touch, a plain tap hops forward
   newGame() { this.startLevel(); },
@@ -2862,7 +2877,7 @@ const MoonDefender = {
   width: DEF_W,
   height: DEF_H,
   usesFire: true,
-  flies: true,   // this one flies up and down as well, so it gets the whole pad
+  flies: true,   // this one flies up and down as well, not just side to side
   readyAt: { x: DEF_W / 2, y: 150 },
   help: 'Shoot the landers and catch any astronaut they drop!',
   newGame() {
@@ -3571,7 +3586,7 @@ function drawMallet(x, y, angle) {
 const BarrelClimb = {
   width: BC_W,
   height: BC_H,
-  climbs: true,        // walks, climbs ladders and jumps, so it gets the whole pad
+  climbs: true,        // walks, climbs ladders and jumps
   tapAction: 'fire',
   fireLabel: 'JUMP',
   readyAt: { x: BC_W / 2, y: 290 },
@@ -3998,22 +4013,30 @@ const STICK_DEAD = 0.3;        // how far out of the middle, as a share of the r
 const STICK_KEEP = 0.72;       // a held direction survives until the other axis is this much bigger
 let stickId = null, stickDirs = [];
 
-// Four-way games pick whichever way the finger leans most, with enough hysteresis that a
-// finger wavering around the diagonal does not rattle between two directions. Only a game
-// that flies gets the diagonals, where holding two at once is the point.
+// The stick reads all eight ways round: the four, plus the corners, where both directions
+// are held at once. Lean north-west in Barrel Climb and he walks left, and goes up the first
+// ladder he meets on the way, because the game is already looking for one underfoot. A
+// direction is easier to keep than it is to find, so a finger holding a corner steady does
+// not drop in and out of it.
+const DIAG_FIND = 0.45;   // the smaller axis joins in once it is this much of the bigger one
+const DIAG_KEEP = 0.30;   // and goes on counting until it falls below this much of it
 function stickAim(dx, dy) {
   if (Math.hypot(dx, dy) < STICK_DEAD) return [];
   const h = dx > 0 ? 'right' : 'left', v = dy > 0 ? 'down' : 'up';
   const ax = Math.abs(dx), ay = Math.abs(dy);
-  if (G.game && G.game.flies) {
-    const dirs = [];
-    if (ax > STICK_DEAD * 0.7 && ax > ay * 0.45) dirs.push(h);
-    if (ay > STICK_DEAD * 0.7 && ay > ax * 0.45) dirs.push(v);
-    return dirs.length ? dirs : [ax >= ay ? h : v];
+  // A game that takes a single turn or a single hop per press has nowhere to put a second
+  // direction, so those get whichever way the finger leans most, with enough hysteresis
+  // that a finger wavering around the corner does not rattle between two of them.
+  if (G.game && G.game.stepped) {
+    if (stickDirs[0] === h && ax >= ay * STICK_KEEP) return [h];
+    if (stickDirs[0] === v && ay >= ax * STICK_KEEP) return [v];
+    return [ax >= ay ? h : v];
   }
-  if (stickDirs[0] === h && ax >= ay * STICK_KEEP) return [h];
-  if (stickDirs[0] === v && ay >= ax * STICK_KEEP) return [v];
-  return [ax >= ay ? h : v];
+  const ratio = d => stickDirs.includes(d) ? DIAG_KEEP : DIAG_FIND;
+  const dirs = [];
+  if (ax > STICK_DEAD * 0.7 && ax > ay * ratio(h)) dirs.push(h);
+  if (ay > STICK_DEAD * 0.7 && ay > ax * ratio(v)) dirs.push(v);
+  return dirs.length ? dirs : [ax >= ay ? h : v];
 }
 
 function aimStick(dirs) {
