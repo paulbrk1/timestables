@@ -330,6 +330,13 @@
   .stick .down { bottom: 8px; left: 50%; transform: translateX(-50%); }
   .stick .left { left: 8px; top: 50%; transform: translateY(-50%); }
   .stick .right { right: 8px; top: 50%; transform: translateY(-50%); }
+  /* The corners, shown only where the game acts on them: hold one and both directions go in */
+  .stick .diag { display: none; font-size: .56rem; opacity: .8; }
+  .dpad.eight .stick .diag { display: block; }
+  .stick .nw { top: 21%; left: 21%; }
+  .stick .ne { top: 21%; right: 21%; }
+  .stick .sw { bottom: 21%; left: 21%; }
+  .stick .se { bottom: 21%; right: 21%; }
   /* A game that only runs side to side says so, rather than offering an up that does nothing */
   .dpad.sideways .stick .up, .dpad.sideways .stick .down { display: none; }
   .knob {
@@ -523,6 +530,10 @@
           <span class="hint down">▼</span>
           <span class="hint left">◀</span>
           <span class="hint right">▶</span>
+          <span class="hint diag nw">◤</span>
+          <span class="hint diag ne">◥</span>
+          <span class="hint diag sw">◣</span>
+          <span class="hint diag se">◢</span>
           <div class="knob" id="stickKnob"></div>
         </div>
         <button class="fire" data-action="fire" aria-label="Fire">FIRE</button>
@@ -1468,7 +1479,10 @@ const FONT = '"Nunito", "Trebuchet MS", sans-serif';
 const canvas = $('gameCanvas');
 const gameCtx = canvas.getContext('2d');
 let ctx = gameCtx; // swapped briefly when drawing the game-picker previews
-const G = { token: 0, state: 'off', scale: 1, game: null, held: {}, touchX: null, touchY: null, popups: [], time: 0 };
+// `aim` is the directions being asked for right now, the most wanted first: the way the
+// stick leans most, or the key pressed last. `held` says what is down, `aim` says in what
+// order to want it, which is what a game needs when a corner asks for two ways at once.
+const G = { token: 0, state: 'off', scale: 1, game: null, held: {}, aim: [], touchX: null, touchY: null, popups: [], time: 0 };
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
@@ -1574,11 +1588,13 @@ function startGame(key) {
   const wrap = $('gameWrap');
   wrap.style.setProperty('--ar', `${game.width} / ${game.height}`);
   wrap.style.setProperty('--ratio', game.width / game.height);
-  // Only a game with something to fire shows the FIRE buttons, and only the game that runs
-  // side to side drops the up and down arrows off the stick face.
+  // Only a game with something to fire shows the FIRE buttons; the game that runs side to
+  // side drops the up and down arrows off the stick face, and the rest get the corners.
   const pad = $('dpad');
+  const sideways = !!game.usesFire && !game.flies;   // Moon Defender only runs left and right
   pad.classList.toggle('has-fire', !!game.usesFire || !!game.climbs);
-  pad.classList.toggle('sideways', !!game.usesFire && !game.flies);
+  pad.classList.toggle('sideways', sideways);
+  pad.classList.toggle('eight', !game.stepped && !sideways);
   for (const b of pad.querySelectorAll('.fire')) b.textContent = game.fireLabel || 'FIRE';
   $('gameHelp').textContent = helpText(game);
   $('overOverlay').hidden = true;
@@ -1593,6 +1609,7 @@ function startGame(key) {
   G.time = 0;
   G.popups = [];
   G.held = {};
+  G.aim = [];
   releaseStick();
   G.touchX = null;
   G.touchY = null;
@@ -1694,8 +1711,11 @@ function togglePause() {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && S.phase === 'game' && G.state !== 'paused') togglePause();
 });
-function pressAction(action) {
-  if (G.game && G.game.press && (G.state === 'play' || G.state === 'ready')) G.game.press(action);
+// `held` marks a press that comes with a finger still on it, which the stick sends and a
+// swipe across the board cannot. A game that reads the held directions itself uses it to
+// tell the two apart.
+function pressAction(action, held) {
+  if (G.game && G.game.press && (G.state === 'play' || G.state === 'ready')) G.game.press(action, held);
 }
 
 function updateGame(dt) {
@@ -1878,8 +1898,20 @@ function advance(e, dist, choose) {
     if (s === d) { e.x = Math.round(e.x); e.y = Math.round(e.y); }
   }
 }
+// Point into a corner and you are asking for two ways at once. Only one of them is
+// usually open in a corridor, so take that one; at a junction where both are, take the way
+// the stick leans most. A swipe has no lean and no hold behind it, so that one still waits
+// in `next` until the maze lets it happen.
+function heroWants() {
+  const out = [];
+  for (const a of G.aim) if (DIRS[a]) out.push(DIRS[a]);
+  return out;
+}
 function heroChoose(p) {
-  if (!blocked(p.x + p.next.x, p.y + p.next.y)) p.dir = p.next;
+  for (const d of heroWants()) {
+    if (!blocked(p.x + d.x, p.y + d.y)) { p.dir = d; p.next = NONE; break; }
+  }
+  if (p.next !== NONE && !blocked(p.x + p.next.x, p.y + p.next.y)) { p.dir = p.next; p.next = NONE; }
   if (blocked(p.x + p.dir.x, p.y + p.dir.y)) p.dir = NONE;
   if (p.dir !== NONE) p.face = p.dir;
 }
@@ -1970,6 +2002,8 @@ function mzUpdate(dt) {
   }
 
   const p = MZ.hero;
+  // Turning back the way you came needs no junction, so it happens the moment it is asked for
+  for (const d of heroWants()) if (isReverse(d, p.dir)) { p.dir = d; p.face = d; p.next = NONE; break; }
   const px = p.x, py = p.y;
   advance(p, MZ.heroSpeed * dt, heroChoose);
   if (p.x !== px || p.y !== py) p.anim += dt;
@@ -2187,7 +2221,9 @@ const Munchy = {
   resetRound: mzResetActors,
   update: mzUpdate,
   draw: mzDraw,
-  press(action) { if (DIRS[action]) steer(DIRS[action]); }
+  // A tap or a swipe queues the turn, so an early tap before a corner still takes it. The
+  // stick does not need to queue anything: it says what it wants for as long as it leans.
+  press(action, held) { if (DIRS[action] && !held) steer(DIRS[action]); }
 };
 
 /* ================= STAR SWARM ================= */
@@ -2558,6 +2594,7 @@ const LilyHop = {
   height: 12 * FT,
   readyAt: { x: 6.5 * FT, y: 5.5 * FT },
   verb: 'Hop',
+  stepped: true,   // one hop per press, so a corner would be two hops at once
   help: 'Dodge the traffic, ride the river, and fill all 4 lily pads!',
   tapAction: 'up', // on touch, a plain tap hops forward
   newGame() { this.startLevel(); },
@@ -2862,7 +2899,7 @@ const MoonDefender = {
   width: DEF_W,
   height: DEF_H,
   usesFire: true,
-  flies: true,   // this one flies up and down as well, so it gets the whole pad
+  flies: true,   // this one flies up and down as well, not just side to side
   readyAt: { x: DEF_W / 2, y: 150 },
   help: 'Shoot the landers and catch any astronaut they drop!',
   newGame() {
@@ -3571,7 +3608,7 @@ function drawMallet(x, y, angle) {
 const BarrelClimb = {
   width: BC_W,
   height: BC_H,
-  climbs: true,        // walks, climbs ladders and jumps, so it gets the whole pad
+  climbs: true,        // walks, climbs ladders and jumps
   tapAction: 'fire',
   fireLabel: 'JUMP',
   readyAt: { x: BC_W / 2, y: 290 },
@@ -3998,33 +4035,44 @@ const STICK_DEAD = 0.3;        // how far out of the middle, as a share of the r
 const STICK_KEEP = 0.72;       // a held direction survives until the other axis is this much bigger
 let stickId = null, stickDirs = [];
 
-// Four-way games pick whichever way the finger leans most, with enough hysteresis that a
-// finger wavering around the diagonal does not rattle between two directions. Only a game
-// that flies gets the diagonals, where holding two at once is the point.
+// The stick reads all eight ways round: the four, plus the corners, where both directions
+// are held at once. Lean north-west in Barrel Climb and he walks left, and goes up the first
+// ladder he meets on the way, because the game is already looking for one underfoot. A
+// direction is easier to keep than it is to find, so a finger holding a corner steady does
+// not drop in and out of it.
+const DIAG_FIND = 0.45;   // the smaller axis joins in once it is this much of the bigger one
+const DIAG_KEEP = 0.30;   // and goes on counting until it falls below this much of it
 function stickAim(dx, dy) {
   if (Math.hypot(dx, dy) < STICK_DEAD) return [];
   const h = dx > 0 ? 'right' : 'left', v = dy > 0 ? 'down' : 'up';
   const ax = Math.abs(dx), ay = Math.abs(dy);
-  if (G.game && G.game.flies) {
-    const dirs = [];
-    if (ax > STICK_DEAD * 0.7 && ax > ay * 0.45) dirs.push(h);
-    if (ay > STICK_DEAD * 0.7 && ay > ax * 0.45) dirs.push(v);
-    return dirs.length ? dirs : [ax >= ay ? h : v];
+  // A game that takes a single turn or a single hop per press has nowhere to put a second
+  // direction, so those get whichever way the finger leans most, with enough hysteresis
+  // that a finger wavering around the corner does not rattle between two of them.
+  if (G.game && G.game.stepped) {
+    if (stickDirs[0] === h && ax >= ay * STICK_KEEP) return [h];
+    if (stickDirs[0] === v && ay >= ax * STICK_KEEP) return [v];
+    return [ax >= ay ? h : v];
   }
-  if (stickDirs[0] === h && ax >= ay * STICK_KEEP) return [h];
-  if (stickDirs[0] === v && ay >= ax * STICK_KEEP) return [v];
-  return [ax >= ay ? h : v];
+  const ratio = d => stickDirs.includes(d) ? DIAG_KEEP : DIAG_FIND;
+  const dirs = [];
+  if (ax > STICK_DEAD * 0.7 && ax > ay * ratio(h)) dirs.push(h);
+  if (ay > STICK_DEAD * 0.7 && ay > ax * ratio(v)) dirs.push(v);
+  if (dirs.length === 2 && ay > ax) dirs.reverse();   // the way it leans most comes first
+  return dirs.length ? dirs : [ax >= ay ? h : v];
 }
 
 function aimStick(dirs) {
   for (const d of stickDirs) if (!dirs.includes(d)) G.held[d] = false;
-  for (const d of dirs) if (!stickDirs.includes(d)) { G.held[d] = true; pressAction(d); }
+  for (const d of dirs) if (!stickDirs.includes(d)) { G.held[d] = true; pressAction(d, true); }
   stickDirs = dirs;
+  G.aim = dirs;
 }
 
 function releaseStick() {
   for (const d of stickDirs) G.held[d] = false;
   stickDirs = [];
+  G.aim = [];
   stickId = null;
   stick.classList.remove('grabbed');
   knob.style.transform = '';
@@ -4124,7 +4172,8 @@ document.addEventListener('keydown', e => {
     const action = KEY_ACTIONS[e.key.toLowerCase()];
     if (action) {
       e.preventDefault();
-      if (!e.repeat) pressAction(action);
+      if (DIRS[action] && !G.held[action]) G.aim = [action, ...G.aim.filter(d => d !== action)];
+      if (!e.repeat) pressAction(action, G.held[action]);
       G.held[action] = true;
     } else if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
       e.preventDefault();
@@ -4143,9 +4192,12 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => {
   const action = KEY_ACTIONS[e.key.toLowerCase()];
-  if (action) G.held[action] = false;
+  if (action) {
+    G.held[action] = false;
+    G.aim = G.aim.filter(d => d !== action);
+  }
 });
-window.addEventListener('blur', () => { G.held = {}; fireDown.clear(); releaseStick(); });
+window.addEventListener('blur', () => { G.held = {}; G.aim = []; fireDown.clear(); releaseStick(); });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
