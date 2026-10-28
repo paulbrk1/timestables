@@ -299,43 +299,61 @@
   .overlay p { margin: .2em 0; }
   .overlay .big { margin-top: 14px; font-size: 1.25rem; padding: 10px 30px; }
   .overlay-title { font-size: clamp(2rem, 8vw, 3rem); font-weight: 900; color: #ffcc00; }
-  .dpad { display: none; grid-template-columns: repeat(3, 72px); grid-template-rows: repeat(3, 62px); gap: 8px; justify-content: center; margin: 14px auto 0; }
-  .dpad button {
-    font-size: 1.7rem; border: 0; border-radius: 16px;
-    background: #eef2f8; color: var(--ink); box-shadow: 0 4px 0 #d3dae6;
+  /* ---- The controls: a joystick box with a FIRE button either side ----
+     The stick has a fixed centre. Put a finger anywhere in the box and the knob leans the
+     way the finger went, and keeps leaning while it is held there, exactly as if you had
+     hold of a real one. The two FIRE buttons do the same thing, so the pad plays the same
+     whichever hand is the one left free. */
+  .dpad {
+    display: none; align-items: center; justify-content: center; gap: 14px;
+    margin: 14px auto 0; --stick: 152px; --fire: 76px;
+  }
+  .dpad .fire {
+    flex: none; width: var(--fire); height: var(--fire); border: 0; border-radius: 50%;
+    font-weight: 900; font-size: 1.05rem;
+    background: var(--red); color: #fff; box-shadow: 0 4px 0 #b32b30;
     touch-action: manipulation; -webkit-tap-highlight-color: transparent;
     user-select: none; -webkit-user-select: none;
   }
-  .dpad button:active { background: var(--blue); color: #fff; transform: translateY(3px); box-shadow: 0 1px 0 #d3dae6; }
-  .dpad [data-action="up"] { grid-area: 1 / 2; }
-  .dpad [data-action="left"] { grid-area: 2 / 1; }
-  .dpad [data-action="right"] { grid-area: 2 / 3; }
-  .dpad [data-action="down"] { grid-area: 3 / 2; }
-  .dpad [data-action="fire"] { display: none; }
-  .dpad.shooter { grid-template-columns: 88px 140px 88px; grid-template-rows: 70px; }
-  .dpad.shooter [data-action="up"], .dpad.shooter [data-action="down"] { display: none; }
-  .dpad.shooter [data-action="left"] { grid-area: 1 / 1; }
-  .dpad.shooter [data-action="fire"] {
-    display: block; grid-area: 1 / 2; font-weight: 900; font-size: 1.3rem;
-    background: var(--red); color: #fff; box-shadow: 0 4px 0 #b32b30;
+  .dpad .fire:active { background: #ff6b70; transform: translateY(3px); box-shadow: 0 1px 0 #b32b30; }
+  /* Games with nothing to fire keep the gaps, so the stick sits in the same spot every time */
+  .dpad:not(.has-fire) .fire { visibility: hidden; }
+  .stick {
+    position: relative; flex: none; width: var(--stick); height: var(--stick); border-radius: 50%;
+    background: radial-gradient(circle at 50% 32%, #f4f7fc, #dbe3ef);
+    box-shadow: inset 0 3px 10px rgba(20, 35, 70, .22), 0 2px 0 #cbd4e2;
+    touch-action: none; -webkit-tap-highlight-color: transparent;
+    user-select: none; -webkit-user-select: none;
   }
-  .dpad.shooter [data-action="fire"]:active { background: #ff6b70; box-shadow: 0 1px 0 #b32b30; }
-  .dpad.shooter [data-action="right"] { grid-area: 1 / 3; }
-  /* A game that flies in all four directions keeps the whole pad, with FIRE in the middle */
-  .dpad.flyer [data-action="fire"] {
-    display: block; grid-area: 2 / 2; font-weight: 900; font-size: 1.1rem;
-    background: var(--red); color: #fff; box-shadow: 0 4px 0 #b32b30;
+  .stick .hint { position: absolute; color: #a7b3c6; font-size: .8rem; line-height: 1; pointer-events: none; }
+  .stick .up { top: 8px; left: 50%; transform: translateX(-50%); }
+  .stick .down { bottom: 8px; left: 50%; transform: translateX(-50%); }
+  .stick .left { left: 8px; top: 50%; transform: translateY(-50%); }
+  .stick .right { right: 8px; top: 50%; transform: translateY(-50%); }
+  /* A game that only runs side to side says so, rather than offering an up that does nothing */
+  .dpad.sideways .stick .up, .dpad.sideways .stick .down { display: none; }
+  .knob {
+    position: absolute; left: 50%; top: 50%; width: 46%; height: 46%; margin: -23% 0 0 -23%;
+    border-radius: 50%; background: var(--blue); box-shadow: 0 4px 0 #2a56c8;
+    pointer-events: none; transition: transform .06s linear;
   }
-  .dpad.flyer [data-action="fire"]:active { background: #ff6b70; box-shadow: 0 1px 0 #b32b30; }
+  /* While it is held, the knob tracks the finger with no easing and sits lower in its socket */
+  .stick.grabbed .knob { box-shadow: 0 2px 0 #2a56c8; transition: none; }
   /* Shown on anything with a touch screen — the media query alone misses tablets
      that also report a mouse, so `html.touch` is set from JS as well. */
-  @media (hover: none) and (pointer: coarse) { .dpad { display: grid; } }
-  html.touch .dpad { display: grid; }
+  @media (hover: none) and (pointer: coarse) { .dpad { display: flex; } }
+  html.touch .dpad { display: flex; }
+  /* The row is 332px wide at full size, and the card leaves about 72px less than the
+     window, so narrow phones step it down rather than letting it hang over the edge. */
+  @media (max-width: 420px) { .dpad { gap: 11px; --stick: 124px; --fire: 62px; } .dpad .fire { font-size: .92rem; } }
+  @media (max-width: 340px) { .dpad { gap: 9px; --stick: 108px; --fire: 54px; } .dpad .fire { font-size: .8rem; } }
   /* A phone held sideways has no room to stack, so the pad sits beside the board */
   #gameView.beside { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px; }
   #gameView.beside .hud { grid-area: 1 / 1 / 2 / 3; }
   #gameView.beside .game-wrap { grid-area: 2 / 1; --floor: 140px; }
-  #gameView.beside .dpad { grid-area: 2 / 2; margin: 0; }
+  /* Sideways there is less height to play with, so the whole pad comes in a size */
+  #gameView.beside .dpad { grid-area: 2 / 2; margin: 0; gap: 9px; --stick: 112px; --fire: 54px; }
+  #gameView.beside .dpad .fire { font-size: .78rem; }
   #gameView.beside .game-help { grid-area: 3 / 1; margin: 6px 0 0; }
   #gameView.beside #gameExit { grid-area: 3 / 2; margin-top: 6px; }
   .game-help { color: var(--muted); font-weight: 800; margin: 10px 0 0; }
@@ -497,12 +515,17 @@
         </div>
       </div>
       <p class="game-help" id="gameHelp"></p>
+      <!-- A fire button each side of the stick, so it plays the same left- or right-handed -->
       <div class="dpad" id="dpad">
-        <button data-action="up" aria-label="Up">▲</button>
-        <button data-action="left" aria-label="Left">◀</button>
-        <button data-action="fire" aria-label="Fire">FIRE</button>
-        <button data-action="right" aria-label="Right">▶</button>
-        <button data-action="down" aria-label="Down">▼</button>
+        <button class="fire" data-action="fire" aria-label="Fire">FIRE</button>
+        <div class="stick" id="stick" role="group" aria-label="Joystick">
+          <span class="hint up">▲</span>
+          <span class="hint down">▼</span>
+          <span class="hint left">◀</span>
+          <span class="hint right">▶</span>
+          <div class="knob" id="stickKnob"></div>
+        </div>
+        <button class="fire" data-action="fire" aria-label="Fire">FIRE</button>
       </div>
       <button class="stop" id="gameExit">✕ Back to times tables</button>
     </div>
@@ -1551,9 +1574,12 @@ function startGame(key) {
   const wrap = $('gameWrap');
   wrap.style.setProperty('--ar', `${game.width} / ${game.height}`);
   wrap.style.setProperty('--ratio', game.width / game.height);
-  $('dpad').classList.toggle('shooter', !!game.usesFire && !game.flies);
-  $('dpad').classList.toggle('flyer', !!game.flies || !!game.climbs);
-  $('dpad').querySelector('[data-action="fire"]').textContent = game.fireLabel || 'FIRE';
+  // Only a game with something to fire shows the FIRE buttons, and only the game that runs
+  // side to side drops the up and down arrows off the stick face.
+  const pad = $('dpad');
+  pad.classList.toggle('has-fire', !!game.usesFire || !!game.climbs);
+  pad.classList.toggle('sideways', !!game.usesFire && !game.flies);
+  for (const b of pad.querySelectorAll('.fire')) b.textContent = game.fireLabel || 'FIRE';
   $('gameHelp').textContent = helpText(game);
   $('overOverlay').hidden = true;
   $('pauseOverlay').hidden = true;
@@ -1567,6 +1593,7 @@ function startGame(key) {
   G.time = 0;
   G.popups = [];
   G.held = {};
+  releaseStick();
   G.touchX = null;
   G.touchY = null;
   game.newGame();
@@ -1590,12 +1617,12 @@ function startGame(key) {
 function helpText(game) {
   const touch = document.documentElement.classList.contains('touch');
   const controls = game.climbs
-    ? (touch ? 'Walk with ◀ ▶, climb with ▲ ▼, tap JUMP.' : 'Walk with ← →, climb with ↑ ↓, jump with Space.')
+    ? (touch ? 'Walk and climb with the stick, tap JUMP.' : 'Walk with ← →, climb with ↑ ↓, jump with Space.')
     : !game.usesFire
-      ? `${game.verb} with the arrow ${touch ? 'buttons' : 'keys'}.`
+      ? (touch ? `${game.verb} with the stick.` : `${game.verb} with the arrow keys.`)
       : game.flies
-        ? (touch ? 'Fly with the arrows and tap FIRE.' : 'Fly with the arrow keys, fire with Space.')
-        : (touch ? 'Move with ◀ ▶ and tap FIRE.' : 'Move with ← →, fire with Space.');
+        ? (touch ? 'Fly with the stick, tap FIRE.' : 'Fly with the arrow keys, fire with Space.')
+        : (touch ? 'Move the stick left and right, tap FIRE.' : 'Move with ← →, fire with Space.');
   return `${controls} ${game.help}`;
 }
 // Keeps the board short enough that the on-screen pad stays visible: below it normally,
@@ -3959,15 +3986,91 @@ window.addEventListener('touchstart', markTouch, { once: true, passive: true });
 $('gameDoneBtn').addEventListener('click', stop);
 $('gameExit').addEventListener('click', stop);
 $('pauseOverlay').addEventListener('click', togglePause);
-for (const btn of $('dpad').children) {
-  const action = btn.dataset.action;
+/* ---------------- The joystick ----------------
+   The box has a fixed centre: wherever the finger goes down, the direction is read from
+   where it is relative to the middle, so sliding the thumb around leans the stick the way
+   a real one would. A dead zone in the middle means a thumb resting dead centre asks for
+   nothing. Holding a direction keeps `G.held` set, which is what the games that move
+   continuously read; crossing into a new direction also fires `pressAction` once, which is
+   what the games that take a single step or turn per press read. The old pad did both too. */
+const stick = $('stick'), knob = $('stickKnob');
+const STICK_DEAD = 0.3;        // how far out of the middle, as a share of the radius, counts
+const STICK_KEEP = 0.72;       // a held direction survives until the other axis is this much bigger
+let stickId = null, stickDirs = [];
+
+// Four-way games pick whichever way the finger leans most, with enough hysteresis that a
+// finger wavering around the diagonal does not rattle between two directions. Only a game
+// that flies gets the diagonals, where holding two at once is the point.
+function stickAim(dx, dy) {
+  if (Math.hypot(dx, dy) < STICK_DEAD) return [];
+  const h = dx > 0 ? 'right' : 'left', v = dy > 0 ? 'down' : 'up';
+  const ax = Math.abs(dx), ay = Math.abs(dy);
+  if (G.game && G.game.flies) {
+    const dirs = [];
+    if (ax > STICK_DEAD * 0.7 && ax > ay * 0.45) dirs.push(h);
+    if (ay > STICK_DEAD * 0.7 && ay > ax * 0.45) dirs.push(v);
+    return dirs.length ? dirs : [ax >= ay ? h : v];
+  }
+  if (stickDirs[0] === h && ax >= ay * STICK_KEEP) return [h];
+  if (stickDirs[0] === v && ay >= ax * STICK_KEEP) return [v];
+  return [ax >= ay ? h : v];
+}
+
+function aimStick(dirs) {
+  for (const d of stickDirs) if (!dirs.includes(d)) G.held[d] = false;
+  for (const d of dirs) if (!stickDirs.includes(d)) { G.held[d] = true; pressAction(d); }
+  stickDirs = dirs;
+}
+
+function releaseStick() {
+  for (const d of stickDirs) G.held[d] = false;
+  stickDirs = [];
+  stickId = null;
+  stick.classList.remove('grabbed');
+  knob.style.transform = '';
+}
+
+stick.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  stickId = e.pointerId;
+  stick.classList.add('grabbed');
+  try { stick.setPointerCapture(e.pointerId); } catch (_) {}
+  moveStick(e);
+});
+stick.addEventListener('pointermove', e => { if (e.pointerId === stickId) moveStick(e); });
+for (const type of ['pointerup', 'pointercancel']) {
+  stick.addEventListener(type, e => { if (e.pointerId === stickId) releaseStick(); });
+}
+
+function moveStick(e) {
+  const r = stick.getBoundingClientRect();
+  const radius = r.width / 2;
+  // How far out the finger is, as -1..1 of the radius. A finger that slides out past the
+  // rim still counts — pointer capture keeps it ours — it just cannot lean any further.
+  let dx = (e.clientX - (r.left + radius)) / radius;
+  let dy = (e.clientY - (r.top + radius)) / radius;
+  const mag = Math.hypot(dx, dy);
+  if (mag > 1) { dx /= mag; dy /= mag; }
+  aimStick(stickAim(dx, dy));
+  // The knob leans a quarter of the radius, so it stays inside its socket
+  knob.style.transform = `translate(${(dx * radius * 0.27).toFixed(1)}px, ${(dy * radius * 0.27).toFixed(1)}px)`;
+}
+
+// Either FIRE button, left-handed or right. Both are the same button as far as the game is
+// concerned, and it stays down while a finger is on either of them.
+const fireDown = new Set();
+for (const btn of $('dpad').querySelectorAll('.fire')) {
   btn.addEventListener('pointerdown', e => {
     e.preventDefault();
-    G.held[action] = true;
-    pressAction(action);
+    fireDown.add(e.pointerId);
+    G.held.fire = true;
+    pressAction('fire');
   });
   for (const type of ['pointerup', 'pointercancel', 'pointerleave']) {
-    btn.addEventListener(type, () => { G.held[action] = false; });
+    btn.addEventListener(type, e => {
+      fireDown.delete(e.pointerId);
+      if (!fireDown.size) G.held.fire = false;
+    });
   }
 }
 
@@ -4042,7 +4145,7 @@ document.addEventListener('keyup', e => {
   const action = KEY_ACTIONS[e.key.toLowerCase()];
   if (action) G.held[action] = false;
 });
-window.addEventListener('blur', () => { G.held = {}; });
+window.addEventListener('blur', () => { G.held = {}; fireDown.clear(); releaseStick(); });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
