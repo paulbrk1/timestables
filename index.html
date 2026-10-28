@@ -1479,7 +1479,10 @@ const FONT = '"Nunito", "Trebuchet MS", sans-serif';
 const canvas = $('gameCanvas');
 const gameCtx = canvas.getContext('2d');
 let ctx = gameCtx; // swapped briefly when drawing the game-picker previews
-const G = { token: 0, state: 'off', scale: 1, game: null, held: {}, touchX: null, touchY: null, popups: [], time: 0 };
+// `aim` is the directions being asked for right now, the most wanted first: the way the
+// stick leans most, or the key pressed last. `held` says what is down, `aim` says in what
+// order to want it, which is what a game needs when a corner asks for two ways at once.
+const G = { token: 0, state: 'off', scale: 1, game: null, held: {}, aim: [], touchX: null, touchY: null, popups: [], time: 0 };
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
@@ -1606,6 +1609,7 @@ function startGame(key) {
   G.time = 0;
   G.popups = [];
   G.held = {};
+  G.aim = [];
   releaseStick();
   G.touchX = null;
   G.touchY = null;
@@ -1707,8 +1711,11 @@ function togglePause() {
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && S.phase === 'game' && G.state !== 'paused') togglePause();
 });
-function pressAction(action) {
-  if (G.game && G.game.press && (G.state === 'play' || G.state === 'ready')) G.game.press(action);
+// `held` marks a press that comes with a finger still on it, which the stick sends and a
+// swipe across the board cannot. A game that reads the held directions itself uses it to
+// tell the two apart.
+function pressAction(action, held) {
+  if (G.game && G.game.press && (G.state === 'play' || G.state === 'ready')) G.game.press(action, held);
 }
 
 function updateGame(dt) {
@@ -1891,8 +1898,20 @@ function advance(e, dist, choose) {
     if (s === d) { e.x = Math.round(e.x); e.y = Math.round(e.y); }
   }
 }
+// Point into a corner and you are asking for two ways at once. Only one of them is
+// usually open in a corridor, so take that one; at a junction where both are, take the way
+// the stick leans most. A swipe has no lean and no hold behind it, so that one still waits
+// in `next` until the maze lets it happen.
+function heroWants() {
+  const out = [];
+  for (const a of G.aim) if (DIRS[a]) out.push(DIRS[a]);
+  return out;
+}
 function heroChoose(p) {
-  if (!blocked(p.x + p.next.x, p.y + p.next.y)) p.dir = p.next;
+  for (const d of heroWants()) {
+    if (!blocked(p.x + d.x, p.y + d.y)) { p.dir = d; p.next = NONE; break; }
+  }
+  if (p.next !== NONE && !blocked(p.x + p.next.x, p.y + p.next.y)) { p.dir = p.next; p.next = NONE; }
   if (blocked(p.x + p.dir.x, p.y + p.dir.y)) p.dir = NONE;
   if (p.dir !== NONE) p.face = p.dir;
 }
@@ -1983,6 +2002,8 @@ function mzUpdate(dt) {
   }
 
   const p = MZ.hero;
+  // Turning back the way you came needs no junction, so it happens the moment it is asked for
+  for (const d of heroWants()) if (isReverse(d, p.dir)) { p.dir = d; p.face = d; p.next = NONE; break; }
   const px = p.x, py = p.y;
   advance(p, MZ.heroSpeed * dt, heroChoose);
   if (p.x !== px || p.y !== py) p.anim += dt;
@@ -2182,7 +2203,6 @@ const Munchy = {
   height: ROWS * T,
   readyAt: { x: 14 * T, y: 18.5 * T },
   verb: 'Steer',
-  stepped: true,   // one queued turn at a time, so the stick hands it a single direction
   help: 'Eat all the dots and dodge the slimes!',
   startSound: () => munchSfx.start(),
   newGame() { this.startLevel(); },
@@ -2201,7 +2221,9 @@ const Munchy = {
   resetRound: mzResetActors,
   update: mzUpdate,
   draw: mzDraw,
-  press(action) { if (DIRS[action]) steer(DIRS[action]); }
+  // A tap or a swipe queues the turn, so an early tap before a corner still takes it. The
+  // stick does not need to queue anything: it says what it wants for as long as it leans.
+  press(action, held) { if (DIRS[action] && !held) steer(DIRS[action]); }
 };
 
 /* ================= STAR SWARM ================= */
@@ -4036,18 +4058,21 @@ function stickAim(dx, dy) {
   const dirs = [];
   if (ax > STICK_DEAD * 0.7 && ax > ay * ratio(h)) dirs.push(h);
   if (ay > STICK_DEAD * 0.7 && ay > ax * ratio(v)) dirs.push(v);
+  if (dirs.length === 2 && ay > ax) dirs.reverse();   // the way it leans most comes first
   return dirs.length ? dirs : [ax >= ay ? h : v];
 }
 
 function aimStick(dirs) {
   for (const d of stickDirs) if (!dirs.includes(d)) G.held[d] = false;
-  for (const d of dirs) if (!stickDirs.includes(d)) { G.held[d] = true; pressAction(d); }
+  for (const d of dirs) if (!stickDirs.includes(d)) { G.held[d] = true; pressAction(d, true); }
   stickDirs = dirs;
+  G.aim = dirs;
 }
 
 function releaseStick() {
   for (const d of stickDirs) G.held[d] = false;
   stickDirs = [];
+  G.aim = [];
   stickId = null;
   stick.classList.remove('grabbed');
   knob.style.transform = '';
@@ -4147,7 +4172,8 @@ document.addEventListener('keydown', e => {
     const action = KEY_ACTIONS[e.key.toLowerCase()];
     if (action) {
       e.preventDefault();
-      if (!e.repeat) pressAction(action);
+      if (DIRS[action] && !G.held[action]) G.aim = [action, ...G.aim.filter(d => d !== action)];
+      if (!e.repeat) pressAction(action, G.held[action]);
       G.held[action] = true;
     } else if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
       e.preventDefault();
@@ -4166,9 +4192,12 @@ document.addEventListener('keydown', e => {
 });
 document.addEventListener('keyup', e => {
   const action = KEY_ACTIONS[e.key.toLowerCase()];
-  if (action) G.held[action] = false;
+  if (action) {
+    G.held[action] = false;
+    G.aim = G.aim.filter(d => d !== action);
+  }
 });
-window.addEventListener('blur', () => { G.held = {}; fireDown.clear(); releaseStick(); });
+window.addEventListener('blur', () => { G.held = {}; G.aim = []; fireDown.clear(); releaseStick(); });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
